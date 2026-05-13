@@ -1,0 +1,26 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    scan_topic: /scan
+
+    # 🔥 Critical fixes
+    queue_size: 50
+    throttle_scans: 1
+
+    # TF handling
+    transform_timeout: 0.2
+    tf_buffer_duration: 5.0
+
+    # Frames
+    map_frame: map
+    use_odom: true
+    odom_frame: odom
+    base_frame: base_link
+    
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+
+    # QoS fix (VERY important for RPLIDAR)
+    qos_overrides:
+      /scan:
+        reliability: best_effort

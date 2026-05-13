@@ -1,0 +1,241 @@
+<?xml version="1.0"?>
+<robot name="f1tenth" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:property name="chassis_length" value="0.37"/>
+  <xacro:property name="chassis_width" value="0.20"/>
+  <xacro:property name="chassis_height" value="0.06"/>
+  
+  <xacro:property name="wheel_radius" value="0.05"/>
+  <xacro:property name="wheel_width" value="0.04"/>
+  
+  <xacro:property name="wheel_base" value="0.28"/>
+  <xacro:property name="track_width" value="0.21"/>
+  
+  <material name="black"><color rgba="0.1 0.1 0.1 1.0"/></material>
+  <material name="white"><color rgba="1.0 1.0 1.0 1.0"/></material>
+  <material name="red"><color rgba="0.8 0.0 0.0 1.0"/></material>
+  <material name="blue"><color rgba="0.0 0.0 0.8 1.0"/></material>
+
+  <xacro:macro name="box_inertial" params="mass x y z">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass / 12.0 * (y*y + z*z)}" ixy="0" ixz="0" iyy="${mass / 12.0 * (x*x + z*z)}" iyz="0" izz="${mass / 12.0 * (x*x + y*y)}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="wheel_inertial" params="mass radius length">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass / 12.0 * (3 * radius * radius + length * length)}" ixy="0" ixz="0" iyy="${0.5 * mass * radius * radius}" iyz="0" izz="${mass / 12.0 * (3 * radius * radius + length * length)}"/>
+    </inertial>
+  </xacro:macro>
+
+  <link name="base_link">
+    <visual>
+      <geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry>
+    </collision>
+    <xacro:box_inertial mass="3.0" x="${chassis_length}" y="${chassis_width}" z="${chassis_height}"/>
+  </link>
+
+  <link name="base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_footprint"/>
+    <origin xyz="0 0 -${wheel_radius}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="raspi">
+    <visual>
+      <geometry><box size="0.09 0.06 0.03"/></geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+  <joint name="raspi_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="raspi"/>
+    <origin xyz="0 0 ${chassis_height/2 + 0.02}"/>
+  </joint>
+
+  <link name="bumper">
+    <visual>
+      <geometry><box size="0.02 0.20 0.04"/></geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+  <joint name="bumper_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="bumper"/>
+    <origin xyz="${chassis_length/2} 0 0"/>
+  </joint>
+
+  <link name="camera_link">
+    <visual>
+      <geometry><box size="0.03 0.03 0.03"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="${-chassis_length/2 + 0.05} 0 0.12" rpy="0 0 0"/>
+  </joint>
+
+  <xacro:macro name="wheel" params="prefix suffix x_reflect y_reflect is_steer">
+    <link name="${prefix}_${suffix}_wheel">
+      <visual>
+        <origin rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="white"/>
+      </visual>
+      <collision>
+        <origin rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <xacro:wheel_inertial mass="0.2" radius="${wheel_radius}" length="${wheel_width}"/>
+    </link>
+
+    <xacro:if value="${is_steer}">
+      <link name="${prefix}_${suffix}_steer">
+        <xacro:box_inertial mass="0.05" x="0.01" y="0.01" z="0.01"/>
+      </link>
+      <joint name="${prefix}_${suffix}_steer_joint" type="revolute">
+        <parent link="base_link"/>
+        <child link="${prefix}_${suffix}_steer"/>
+        <origin xyz="${x_reflect * wheel_base/2} ${y_reflect * track_width/2} 0"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-0.5" upper="0.5" effort="100.0" velocity="10.0"/>
+      </joint>
+      <joint name="${prefix}_${suffix}_wheel_joint" type="continuous">
+        <parent link="${prefix}_${suffix}_steer"/>
+        <child link="${prefix}_${suffix}_wheel"/>
+        <axis xyz="0 1 0"/>
+        <limit effort="10.0" velocity="100.0"/>
+      </joint>
+    </xacro:if>
+
+    <xacro:unless value="${is_steer}">
+      <joint name="${prefix}_${suffix}_wheel_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="${prefix}_${suffix}_wheel"/>
+        <origin xyz="${x_reflect * wheel_base/2} ${y_reflect * track_width/2} 0"/>
+        <axis xyz="0 1 0"/>
+        <limit effort="10.0" velocity="100.0"/>
+      </joint>
+    </xacro:unless>
+  </xacro:macro>
+
+  <xacro:wheel prefix="front" suffix="left" x_reflect="1" y_reflect="1" is_steer="true"/>
+  <xacro:wheel prefix="front" suffix="right" x_reflect="1" y_reflect="-1" is_steer="true"/>
+  <xacro:wheel prefix="rear" suffix="left" x_reflect="-1" y_reflect="1" is_steer="false"/>
+  <xacro:wheel prefix="rear" suffix="right" x_reflect="-1" y_reflect="-1" is_steer="false"/>
+
+  <link name="steering_wheel">
+    <xacro:box_inertial mass="0.01" x="0.01" y="0.01" z="0.01"/>
+  </link>
+  <joint name="steering_wheel_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="steering_wheel"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-10.0" upper="10.0" effort="100.0" velocity="10.0"/>
+  </joint>
+
+  <gazebo>
+    <plugin name="gazebo_ros_joint_state_publisher" filename="libgazebo_ros_joint_state_publisher.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>joint_states:=joint_states</remapping>
+      </ros>
+      <update_rate>100</update_rate>
+      <joint_name>front_left_steer_joint</joint_name>
+      <joint_name>front_right_steer_joint</joint_name>
+      <joint_name>front_left_wheel_joint</joint_name>
+      <joint_name>front_right_wheel_joint</joint_name>
+      <joint_name>rear_left_wheel_joint</joint_name>
+      <joint_name>rear_right_wheel_joint</joint_name>
+      <joint_name>steering_wheel_joint</joint_name>
+    </plugin>
+    <plugin name="gazebo_ros_ackermann_drive" filename="libgazebo_ros_ackermann_drive.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+
+      <update_rate>100.0</update_rate>
+
+      <front_left_joint>front_left_wheel_joint</front_left_joint>
+      <front_right_joint>front_right_wheel_joint</front_right_joint>
+      <rear_left_joint>rear_left_wheel_joint</rear_left_joint>
+      <rear_right_joint>rear_right_wheel_joint</rear_right_joint>
+      <left_steering_joint>front_left_steer_joint</left_steering_joint>
+      <right_steering_joint>front_right_steer_joint</right_steering_joint>
+      <steering_wheel_joint>steering_wheel_joint</steering_wheel_joint>
+
+      <max_steer>0.5</max_steer>
+      <max_steering_angle>7.85</max_steering_angle>
+      <max_speed>20.0</max_speed>
+      <wheel_separation>${track_width}</wheel_separation>
+      <wheel_base>${wheel_base}</wheel_base>
+      <wheel_diameter>${wheel_radius * 2}</wheel_diameter>
+
+      <!-- PID tuning -->
+      <left_steering_pid_gain>20.0 0 0.1</left_steering_pid_gain>
+      <left_steering_i_range>0 0</left_steering_i_range>
+      <right_steering_pid_gain>20.0 0 0.1</right_steering_pid_gain>
+      <right_steering_i_range>0 0</right_steering_i_range>
+      <linear_velocity_pid_gain>5.0 0 0.1</linear_velocity_pid_gain>
+      <linear_velocity_i_range>0 0</linear_velocity_i_range>
+ 
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>false</publish_wheel_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="front_left_wheel">
+    <mu1>1.5</mu1><mu2>1.5</mu2>
+    <kp>500.0</kp><kd>5.0</kd>
+    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="front_right_wheel">
+    <mu1>1.5</mu1><mu2>1.5</mu2>
+    <kp>500.0</kp><kd>5.0</kd>
+    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="rear_left_wheel">
+    <mu1>1.5</mu1><mu2>1.5</mu2>
+    <kp>500.0</kp><kd>5.0</kd>
+    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+  <gazebo reference="rear_right_wheel">
+    <mu1>1.5</mu1><mu2>1.5</mu2>
+    <kp>500.0</kp><kd>5.0</kd>
+    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <fdir1>1 0 0</fdir1>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <sensor name="camera" type="camera">
+      <update_rate>30</update_rate>
+      <camera>
+        <horizontal_fov>1.396</horizontal_fov>
+        <image><width>640</width><height>480</height></image>
+      </camera>
+      <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+        <ros><remapping>image_raw:=camera/image_raw</remapping></ros>
+        <frame_name>camera_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>

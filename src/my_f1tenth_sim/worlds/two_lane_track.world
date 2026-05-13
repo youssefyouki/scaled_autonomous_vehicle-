@@ -1,0 +1,52 @@
+<?xml version='1.0'?>
+<sdf version='1.6'>
+  <world name='f1tenth_track'>
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- Single 6x6 meter plane for the SVG track -->
+    <model name='svg_track_plane'>
+      <static>1</static>
+      <link name='link'>
+        <!-- Z=0.01 to sit slightly above the default ground_plane -->
+        <pose>0 0 0.01 0 0 0</pose> 
+        <collision name='collision'>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>6 6</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <!-- High friction to match your stable car physics -->
+                <mu>1.5</mu> 
+                <mu2>1.5</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name='visual'>
+          <cast_shadows>0</cast_shadows>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>6 6</size>
+            </plane>
+          </geometry>
+          <material>
+            <script>
+              <!-- Ensure this points to your specific material file -->
+              <uri>model://my_f1tenth_sim/materials/scripts</uri>
+              <uri>model://my_f1tenth_sim/materials/textures</uri>
+              <name>F1Tenth/TrackImage</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <scene><ambient>0.5 0.5 0.5 1</ambient></scene>
+  </world>
+</sdf>
