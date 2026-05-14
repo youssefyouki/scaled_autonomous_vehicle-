@@ -184,12 +184,12 @@
       <wheel_diameter>${wheel_radius * 2}</wheel_diameter>
 
       <!-- PID tuning -->
-      <left_steering_pid_gain>20.0 0 0.1</left_steering_pid_gain>
-      <left_steering_i_range>0 0</left_steering_i_range>
-      <right_steering_pid_gain>20.0 0 0.1</right_steering_pid_gain>
-      <right_steering_i_range>0 0</right_steering_i_range>
-      <linear_velocity_pid_gain>5.0 0 0.1</linear_velocity_pid_gain>
-      <linear_velocity_i_range>0 0</linear_velocity_i_range>
+      <left_steering_pid_gain>50.0 0.1 0.5</left_steering_pid_gain>
+      <left_steering_i_range>-1 1</left_steering_i_range>
+      <right_steering_pid_gain>50.0 0.1 0.5</right_steering_pid_gain>
+      <right_steering_i_range>-1 1</right_steering_i_range>
+      <linear_velocity_pid_gain>500.0 50.0 1.0</linear_velocity_pid_gain>
+      <linear_velocity_i_range>-100 100</linear_velocity_i_range>
  
       <publish_odom>true</publish_odom>
       <publish_odom_tf>true</publish_odom_tf>

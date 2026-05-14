@@ -38,6 +38,9 @@ install(
     src/keyboard_drive.py
     src/camera_viewer.py
     src/velocity_keeper.py
+    src/lane_detector_node.py
+    src/stanley_control_node.py
+    src/pure_pursuit_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
