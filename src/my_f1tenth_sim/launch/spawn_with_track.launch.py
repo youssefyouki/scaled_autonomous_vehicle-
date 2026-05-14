@@ -1,7 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable, TimerAction, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable, TimerAction, DeclareLaunchArgument, AppendEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -38,6 +38,11 @@ def generate_launch_description():
 
     disable_model_db = SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', '')
 
+    append_model_path = AppendEnvironmentVariable(
+        'GAZEBO_MODEL_PATH',
+        os.path.join(pkg_path, '..')
+    )
+
     node_robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -60,6 +65,7 @@ def generate_launch_description():
     return LaunchDescription([
         declare_gui_arg,
         disable_model_db,
+        append_model_path,
         gazebo_server,
         gazebo_client,
         node_robot_state_publisher,

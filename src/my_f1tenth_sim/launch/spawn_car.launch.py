@@ -16,7 +16,7 @@ def generate_launch_description():
     robot_description_config = xacro.process_file(xacro_file)
 
     gazebo_model_path = os.pathsep.join(
-        [pkg_path, os.environ.get('GAZEBO_MODEL_PATH', '')]
+        [os.path.dirname(pkg_path), os.environ.get('GAZEBO_MODEL_PATH', '')]
     ).rstrip(os.pathsep)
 
     # Allow selecting a world; default to our two_lane_track.
