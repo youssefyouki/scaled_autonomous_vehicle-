@@ -51,10 +51,9 @@ class PurePursuitController(Node):
         # Start slow — increase once lane-keeping is stable on the full loop
         self.target_speed = 0.5   # m/s — safe starting speed
 
-        # Pure Pursuit lookahead distance (m).
-        # δ = atan(2·e·wheelbase / L²)  — shorter L → stronger steering response
-        # Too large (0.8m) caps δ at ~13° even at max error; 0.3m triples authority.
-        self.L = 0.25             # m — gain = 2*0.28/0.25² = 8.96 rad/m (1cm→5° steer)
+        # Velocity-scaled look-ahead: L = max(l_min, k_v * v)
+        # Keeps cornering authority on tight turns while damping weave on straights.
+        # l_min=0.22 m floor preserves strong steering at near-zero speed.
 
         self.max_steer   = 0.5   # max steering angle (rad) — matches URDF joint limit
         self.alpha       = 0.5   # EMA weight — second filter layer on top of detector EMA
@@ -95,9 +94,12 @@ class PurePursuitController(Node):
             self.get_logger().warn('No perception data — car stopped.', throttle_duration_sec=1.0)
             return
 
-        # 1. Pure Pursuit curvature from lateral error
-        #    κ = 2·e / L²  →  δ_pp = atan(κ · wheelbase)
-        curvature = 2.0 * self.e / (self.L ** 2)
+        # 1. Pure Pursuit curvature from lateral error with velocity-scaled look-ahead.
+        #    L grows with speed so straights stay stable while corners keep authority.
+        k_v       = 0.2
+        l_min     = 0.22
+        dynamic_L = max(l_min, k_v * self.v_actual)
+        curvature = 2.0 * self.e / (dynamic_L ** 2)
         delta_pp  = math.atan(curvature * self.wheelbase)
 
         # 2. Blend (clamped) heading error

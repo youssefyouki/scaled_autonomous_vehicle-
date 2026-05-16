@@ -54,11 +54,15 @@ class StanleyController(Node):
         self.target_speed = 0.5   # m/s — safe starting speed (matches pure pursuit)
 
         # Stanley gains
-        # k      : crosstrack gain — higher = more aggressive lateral correction
-        # k_soft : softening constant — prevents division-by-zero and reduces
-        #          oscillation at low speeds (increase if car wiggles at <0.3 m/s)
-        self.k      = 1.5
-        self.k_soft = 0.5
+        # k      : crosstrack gain — crisped up to 1.8 for tighter lateral correction
+        # k_soft : softening constant — reduced to 0.4 for sharper response at low speed
+        self.k      = 1.8
+        self.k_soft = 0.4
+
+        # 50% heading feed-forward — the heading error is now evaluated at a
+        # look-ahead row (~0.25 m ahead) in the detector, making it predictive
+        # enough to warrant a stronger weight here without causing oscillation.
+        self.heading_gain = 0.5
 
         self.max_steer = 0.5   # max steering angle (rad) — matches URDF joint limit
         self.alpha     = 0.5   # EMA weight — matches pure pursuit (double-filtered
@@ -97,9 +101,10 @@ class StanleyController(Node):
             return
 
         # 1. Stanley steering law
-        #    δ = θ_e + arctan(k · e / (v + k_soft))
-        atan_term     = math.atan2(self.k * self.e, self.v_actual + self.k_soft)
-        steering_angle = self.th_e + atan_term
+        #    δ = heading_gain·θ_e + arctan(k · e / (v + k_soft))
+        #    heading_gain=0 → pure crosstrack Stanley (no early-turn preview)
+        atan_term      = math.atan2(self.k * self.e, self.v_actual + self.k_soft)
+        steering_angle = self.heading_gain * self.th_e + atan_term
 
         # 2. Clamp to physical steering limit
         steering_angle = max(-self.max_steer, min(self.max_steer, steering_angle))
