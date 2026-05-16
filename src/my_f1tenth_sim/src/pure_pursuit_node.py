@@ -10,9 +10,9 @@ Subscribes to:
 Publishes:
   /cmd_vel  (geometry_msgs/Twist)  linear.x = wheel angular vel cmd, angular.z = yaw-rate
 
-NOTE: gazebo_ros_ackermann_drive interprets linear.x as wheel angular velocity (rad/s)
+NOTE: gazebo_ros_ackermann_drive interprets linear.x as the target LINEAR speed (m/s)
       and angular.z as desired yaw rate (rad/s).
-      wheel_radius = 0.05 m → target_speed=2.5 ≈ 0.125 m/s forward.
+      Keep target_speed low (≤1.0 m/s) until the track loop is stable.
 """
 import rclpy
 from rclpy.node import Node
@@ -47,15 +47,17 @@ class PurePursuitController(Node):
         self.PERCEPTION_TIMEOUT_S = 1.0   # seconds before stopping
 
         # ── Tuning Parameters ─────────────────────────────────────────────────
-        # gazebo_ros_ackermann_drive: linear.x = wheel angular velocity (rad/s)
-        # wheel_radius=0.05m → cmd=2.5 gives ~0.125 m/s forward
-        self.target_speed = 2.5   # wheel angular velocity cmd
+        # gazebo_ros_ackermann_drive: linear.x = target LINEAR speed (m/s)
+        # Start slow — increase once lane-keeping is stable on the full loop
+        self.target_speed = 0.5   # m/s — safe starting speed
 
-        # Pure Pursuit lookahead distance (m).  Tune this first.
-        self.L = 0.8              # larger = smoother but less reactive
+        # Pure Pursuit lookahead distance (m).
+        # δ = atan(2·e·wheelbase / L²)  — shorter L → stronger steering response
+        # Too large (0.8m) caps δ at ~13° even at max error; 0.3m triples authority.
+        self.L = 0.25             # m — gain = 2*0.28/0.25² = 8.96 rad/m (1cm→5° steer)
 
         self.max_steer   = 0.5   # max steering angle (rad) — matches URDF joint limit
-        self.alpha       = 0.25  # EMA smoothing (lower = more filtering)
+        self.alpha       = 0.5   # EMA weight — second filter layer on top of detector EMA
 
         # Heading gain: KEEP LOW or 0. The heading_error from the detector is
         # noisy (jumps to ±65°) and easily destabilises the car.

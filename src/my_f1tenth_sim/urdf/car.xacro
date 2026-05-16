@@ -38,7 +38,7 @@
     <collision>
       <geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry>
     </collision>
-    <xacro:box_inertial mass="3.0" x="${chassis_length}" y="${chassis_width}" z="${chassis_height}"/>
+    <xacro:box_inertial mass="2.0" x="${chassis_length}" y="${chassis_width}" z="${chassis_height}"/>
   </link>
 
   <link name="base_footprint"/>
@@ -183,13 +183,13 @@
       <wheel_base>${wheel_base}</wheel_base>
       <wheel_diameter>${wheel_radius * 2}</wheel_diameter>
 
-      <!-- PID tuning -->
-      <left_steering_pid_gain>50.0 0.1 0.5</left_steering_pid_gain>
-      <left_steering_i_range>-1 1</left_steering_i_range>
-      <right_steering_pid_gain>50.0 0.1 0.5</right_steering_pid_gain>
-      <right_steering_i_range>-1 1</right_steering_i_range>
-      <linear_velocity_pid_gain>500.0 50.0 1.0</linear_velocity_pid_gain>
-      <linear_velocity_i_range>-100 100</linear_velocity_i_range>
+      <!-- PID tuning — matched to BFMC reference plugin (kp=10, ki=0, kd=0.1) -->
+      <left_steering_pid_gain>10.0 0.0 0.1</left_steering_pid_gain>
+      <left_steering_i_range>-0.5 0.5</left_steering_i_range>
+      <right_steering_pid_gain>10.0 0.0 0.1</right_steering_pid_gain>
+      <right_steering_i_range>-0.5 0.5</right_steering_i_range>
+      <linear_velocity_pid_gain>500.0 0.0 1.0</linear_velocity_pid_gain>
+      <linear_velocity_i_range>-10 10</linear_velocity_i_range>
  
       <publish_odom>true</publish_odom>
       <publish_odom_tf>true</publish_odom_tf>
@@ -199,28 +199,46 @@
     </plugin>
   </gazebo>
 
+  <!-- Wheel surface properties — matched to BFMC reference (wheel_left/model.sdf)
+       kp=1e7, kd=1, mu=0.7, maxVel=0.01
+       Front wheels keep mu2=0.2 for Ackermann lateral slip; rear=0.7 for traction -->
   <gazebo reference="front_left_wheel">
-    <mu1>1.5</mu1><mu2>1.5</mu2>
-    <kp>500.0</kp><kd>5.0</kd>
-    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <mu1>0.7</mu1>
+    <mu2>0.2</mu2>
+    <kp>10000000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.01</maxVel>
     <fdir1>1 0 0</fdir1>
   </gazebo>
+
   <gazebo reference="front_right_wheel">
-    <mu1>1.5</mu1><mu2>1.5</mu2>
-    <kp>500.0</kp><kd>5.0</kd>
-    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <mu1>0.7</mu1>
+    <mu2>0.2</mu2>
+    <kp>10000000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.01</maxVel>
     <fdir1>1 0 0</fdir1>
   </gazebo>
+
   <gazebo reference="rear_left_wheel">
-    <mu1>1.5</mu1><mu2>1.5</mu2>
-    <kp>500.0</kp><kd>5.0</kd>
-    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <mu1>0.7</mu1>
+    <mu2>0.7</mu2>
+    <kp>10000000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.01</maxVel>
     <fdir1>1 0 0</fdir1>
   </gazebo>
+
   <gazebo reference="rear_right_wheel">
-    <mu1>1.5</mu1><mu2>1.5</mu2>
-    <kp>500.0</kp><kd>5.0</kd>
-    <minDepth>0.001</minDepth><maxVel>10.0</maxVel>
+    <mu1>0.7</mu1>
+    <mu2>0.7</mu2>
+    <kp>10000000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.01</maxVel>
     <fdir1>1 0 0</fdir1>
   </gazebo>
 
