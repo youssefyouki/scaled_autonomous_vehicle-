@@ -70,8 +70,7 @@ class LaneDetector(Node):
         self.top_row_index = self.bottom_row_index + self.real_slices * self.step  # 242
         self.height_norm   = np.linspace(0, 1, self.real_slices + 1)           # 20 values
         self.slices = _slices
-        # Heading is evaluated halfway up the scan region (~0.25 m ahead at 0.5 m/s)
-        # rather than at the car's current position, giving curve anticipation.
+        # Heading evaluated halfway up (~0.25 m ahead) for early curve anticipation.
         self.y_hdg = self.bottom_row_index + (self.real_slices // 2) * self.step  # ≈ 362
 
         # ── Peak detection ────────────────────────────────────────────────────
@@ -89,11 +88,13 @@ class LaneDetector(Node):
         self.max_allowed_dist = 0.15 * self.bev_w   # 96 px — max lateral jump/slice
         self.w_width    = 0.3
         self.w_expected = 0.7
-        self.min_peaks  = 3     # min peaks for a valid lane track
+        self.min_peaks  = 2     # min peaks for a valid lane track (was 3; 2 handles sparse curve visibility)
         self.opt_perc   = 0.3   # "enough" peak fraction
 
         # ── Polynomial sanity ─────────────────────────────────────────────────
-        self.extreme_coef_2 = 0.1   # |a| must be < 0.1 for 2nd-degree
+        # 0.2 (was 0.1) allows tighter-curve polynomials through; the original
+        # LaneAssist value was calibrated for a wider-radius track.
+        self.extreme_coef_2 = 0.2   # |a| must be < 0.2 for 2nd-degree
         self.extreme_coef_1 = 3.0   # |a| must be < 3.0 for 1st-degree
 
         # ── Certainty / trust ─────────────────────────────────────────────────
@@ -106,6 +107,7 @@ class LaneDetector(Node):
 
         # ── Output state ──────────────────────────────────────────────────────
         self.smooth_e      = 0.0
+        self.smooth_hdg    = 0.0    # EMA-filtered heading; decays slowly when lanes lost
         self.meters_per_px = 0.8 / 340.0
         self._last_lx = float(self.bev_w // 2 - 150)
         self._last_rx = float(self.bev_w // 2 + 150)
@@ -400,8 +402,8 @@ class LaneDetector(Node):
         # 7. Certainty / trust
         lc, rc, l_cert, r_cert, trust_l, trust_r = self._post_process(lc, left, rc, right)
 
-        # 8. Crosstrack error
-        y_e = self.bottom_row_index   # evaluate polynomial at near-field row
+        # 8. Crosstrack error — evaluated at near-field row
+        y_e = self.bottom_row_index
 
         def poly_x(coef):
             a, b, c = coef
@@ -423,10 +425,18 @@ class LaneDetector(Node):
         if lx >= rx:    # crossed polys — fall back
             lx, rx = self._last_lx, self._last_rx
 
-        lane_centre    = (lx + rx) / 2.0
-        err_px         = self.bev_w / 2.0 - lane_centre
-        crosstrack_raw = err_px * self.meters_per_px
-        self.smooth_e  = 0.35 * crosstrack_raw + 0.65 * self.smooth_e
+        lane_centre = (lx + rx) / 2.0
+        err_px      = self.bev_w / 2.0 - lane_centre
+
+        lanes_active = (trust_l and lc is not None) or (trust_r and rc is not None)
+        if lanes_active:
+            crosstrack_raw = err_px * self.meters_per_px
+            self.smooth_e  = 0.35 * crosstrack_raw + 0.65 * self.smooth_e
+        else:
+            # Both polynomials lost — decay the existing correction instead of
+            # feeding near-zero from stale centred positions (which collapses
+            # smooth_e to 0 in ~2 frames via the normal EMA path).
+            self.smooth_e *= 0.97
 
         # 9. Heading error from polynomial derivative at look-ahead row (y_hdg ≈ 0.25 m ahead)
         #    Evaluating mid-scan rather than at the car's position gives curve anticipation:
@@ -439,12 +449,21 @@ class LaneDetector(Node):
             slopes.append(poly_slope(lc))
         if trust_r and rc is not None:
             slopes.append(poly_slope(rc))
-        avg_slope = sum(slopes) / len(slopes) if slopes else 0.0
-        hdg = -math.atan(avg_slope)
+
+        if slopes:
+            # Lanes visible — track heading with a responsive EMA
+            hdg_raw = -math.atan(sum(slopes) / len(slopes))
+            self.smooth_hdg = 0.35 * hdg_raw + 0.65 * self.smooth_hdg
+        else:
+            # Lanes lost (curve exit blind spot) — decay slowly so the car
+            # continues turning rather than going straight immediately.
+            # 0.95/frame → still 77% of last heading after 5 frames (0.25 s).
+            self.smooth_hdg *= 0.95
 
         # 10. Publish
         e_msg  = Float32(); e_msg.data  = float(self.smooth_e)
-        th_msg = Float32(); th_msg.data = float(hdg)
+        th_msg = Float32(); th_msg.data = float(self.smooth_hdg)
+        hdg = self.smooth_hdg   # alias for visualisation
         self.e_pub.publish(e_msg)
         self.th_pub.publish(th_msg)
 
@@ -494,7 +513,7 @@ class LaneDetector(Node):
         # Reference lines
         cv2.line(out, (W // 2, 0),           (W // 2, H),           (0, 255, 255), 1)
         cv2.line(out, (int(lane_centre), 0), (int(lane_centre), H), (255, 255, 0), 2)
-        cv2.line(out, (0, self.bottom_row_index), (W, self.bottom_row_index), (0, 200, 200), 1)
+        cv2.line(out, (0, self.bottom_row_index), (W, self.bottom_row_index), (0, 200, 100), 1)
         cv2.line(out, (0, self.y_hdg),       (W, self.y_hdg),       (0, 100, 255), 1)  # heading row
 
         cv2.putText(out,
