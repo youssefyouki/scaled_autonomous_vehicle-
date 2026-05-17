@@ -50,18 +50,18 @@ class LaneDetector(Node):
         self.th_pub = self.create_publisher(Float32, '/perception/heading_error', 10)
 
         # ── BEV calibration ───────────────────────────────────────────────────
-        self.src_pts = np.float32([[30, 325], [610, 325], [420, 248], [220, 248]])
+        # Bottom source row extended to 390: raw rows 325-390 (beside/in-front
+        # of the car) now warp into the bottom of the BEV.  The car body is blue
+        # so its pixels are dark in CLAHE grayscale and ignored by peak detection.
+        self.src_pts = np.float32([[30, 390], [610, 390], [420, 248], [220, 248]])
         self.dst_pts = np.float32([[0, 480],  [640, 480], [640, 0],   [0, 0]])
         self.M    = cv2.getPerspectiveTransform(self.src_pts, self.dst_pts)
         self.bev_w = 640
         self.bev_h = 480
 
         # ── Slice geometry (mirrors LaneAssist choose_455 for our BEV) ────────
-        # bottom_row_index = 470  (near-field, bottom of BEV)
-        # top_row_index    = 242  (far-field,  top of scan region)
-        # step             = -12  (12 px per slice, 19 real slices)
         _slices      = 20
-        _bot_off     = 10
+        _bot_off     = 3   # scan almost to the BEV bottom to use the new near-field
         _bot_perc    = 0.5
         self.bottom_row_index = self.bev_h - _bot_off                          # 470
         _end          = int((1 - _bot_perc) * self.bev_h)                      # 240
@@ -77,15 +77,18 @@ class LaneDetector(Node):
         # Tuned for CLAHE-equalized grayscale; lane markings measure V ≈ 80–152.
         # sq_min_height_curr auto-lowers each frame toward observed peak intensity.
         self.peaks_min_width    = 3
-        self.peaks_max_width    = 20
+        self.peaks_max_width    = 80    # large flat limit: curved/horizontal lines appear
+                                        # very wide (width = real_w / sin(angle)); far-field
+                                        # BEV stretch also needs headroom
         self.sq_min_height      = 80    # hard floor — reset on sparse frames
         self.sq_min_height_curr = 80    # adaptive threshold used this frame
         self.sq_pix_dif         = 3
         self.sq_min_height_dif  = 30    # edge sharpness (was 60 in original 455 camera)
-        self.sq_width_error     = 10
+        self.sq_width_error     = 15
 
         # ── Clustering ────────────────────────────────────────────────────────
-        self.max_allowed_dist = 0.15 * self.bev_w   # 96 px — max lateral jump/slice
+        self.max_allowed_dist = 0.30 * self.bev_w   # 192 px — wide enough to track a
+                                                     # line that sweeps laterally on bends
         self.w_width    = 0.3
         self.w_expected = 0.7
         self.min_peaks  = 2     # min peaks for a valid lane track (was 3; 2 handles sparse curve visibility)
@@ -109,22 +112,24 @@ class LaneDetector(Node):
         self.smooth_e      = 0.0
         self.smooth_hdg    = 0.0    # EMA-filtered heading; decays slowly when lanes lost
         self.meters_per_px = 0.8 / 340.0
-        self._last_lx = float(self.bev_w // 2 - 150)
-        self._last_rx = float(self.bev_w // 2 + 150)
+        self._last_lx       = float(self.bev_w // 2 - 150)
+        self._last_rx       = float(self.bev_w // 2 + 150)
+        self._lane_width_px = float(self._last_rx - self._last_lx)  # ~300 px; updated when both lanes seen
+        self._last_centre   = float(self.bev_w / 2.0)               # EMA of lane centre; single-line disambiguation
 
         self.get_logger().info('Lane Detector (LaneAssist) started.')
 
     # ══════════════════════ LaneAssist core methods ═══════════════════════════
 
-    def _find_lane_peaks(self, row, height_norm):
+    def _find_lane_peaks(self, row):
         """Detect square-pulse lane markings in one horizontal grayscale row.
 
-        Width thresholds scale with height_norm (0=near, 1=far) so narrow
-        perspective-projected markings at the far end are not rejected.
+        Flat width limit: a curved line that runs nearly horizontal appears very
+        wide in a horizontal scan (apparent_width = real_width / sin(angle)).
+        Using a large flat cap lets near-field horizontal sections be detected;
+        far-field BEV stretch is also within the same cap.
         """
-        max_w = self.peaks_max_width - (
-            (self.peaks_max_width - self.peaks_min_width) * height_norm)
-        upper = max_w + self.sq_width_error
+        upper = self.peaks_max_width + self.sq_width_error   # flat, height-independent
 
         inside  = False
         peaks   = []
@@ -289,10 +294,9 @@ class LaneDetector(Node):
         """Scan BEV rows bottom→top, detect square-pulse peaks, cluster into lanes."""
         peaks = []
         lanes = []
-        for cnt, y in enumerate(range(self.bottom_row_index,
-                                      self.top_row_index - 1, self.step)):
+        for y in range(self.bottom_row_index, self.top_row_index - 1, self.step):
             row = [int(v) for v in gray[y]]
-            ps  = self._find_lane_peaks(row, self.height_norm[cnt])
+            ps  = self._find_lane_peaks(row)
             peaks.extend([p, y] for p in ps)
             lanes = self._cluster(ps, y, lanes)   # ps modified in-place (matched pts removed)
         return lanes, peaks
@@ -302,6 +306,19 @@ class LaneDetector(Node):
         left, right = [], []
         lanes = [ln for ln in lanes if len(ln) >= self.min_peaks]
         mid   = self.bev_w / 2.0
+
+        # Single track: assign to whichever side it's closer to based on history.
+        # Use the BOTTOMMOST point x (nearest to car) — using all-point mean pulls
+        # toward far-field curve data and causes misclassification on bends.
+        if len(lanes) == 1:
+            lane = lanes[0]
+            bot_x = sorted(lane, key=lambda p: p[1], reverse=True)[0][0]
+            if abs(bot_x - self._last_lx) <= abs(bot_x - self._last_rx):
+                left = lane
+            else:
+                right = lane
+            return left, right
+
         for lane in lanes:
             n = len(lane)
             if lane[0][0] <= mid:
@@ -368,9 +385,11 @@ class LaneDetector(Node):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         H_img, W_img = frame.shape[:2]
 
-        # 1. ROI mask
+        # 1. ROI mask — bottom extended to 395 to include near-field beside the car.
+        #    The car body is blue so its pixels stay dark after CLAHE and are
+        #    invisible to the peak detector — no body mask needed.
         frame[:235, :] = 0
-        frame[330:, :] = 0
+        frame[395:, :] = 0
 
         # 2. BEV warp
         warped = cv2.warpPerspective(frame, self.M, (W_img, H_img))
@@ -402,31 +421,62 @@ class LaneDetector(Node):
         # 7. Certainty / trust
         lc, rc, l_cert, r_cert, trust_l, trust_r = self._post_process(lc, left, rc, right)
 
-        # 8. Crosstrack error — evaluated at near-field row
-        y_e = self.bottom_row_index
+        # 8. Crosstrack error — use raw near-field points (bottom 3 slices).
+        #    With _bot_off=3, bottom_row_index=477; cutoff_y = 477+3*(-12) = 441.
+        #    These slices correspond to raw rows ≈381-390, right beside the car.
+        cutoff_y = self.bottom_row_index + 3 * self.step
 
-        def poly_x(coef):
-            a, b, c = coef
-            return a * y_e**2 + b * y_e + c
+        def near_x(lane):
+            pts = [p for p in lane if p[1] >= cutoff_y]
+            if not pts:
+                pts = lane  # fallback when no near-field detections
+            pts = sorted(pts, key=lambda p: p[1], reverse=True)[:3]
+            return float(sum(p[0] for p in pts)) / len(pts)
 
-        lx = poly_x(lc) if (trust_l and lc is not None) else None
-        rx = poly_x(rc) if (trust_r and rc is not None) else None
+        lx = near_x(left)  if (trust_l and lc is not None and left)  else None
+        rx = near_x(right) if (trust_r and rc is not None and right) else None
 
-        if lx is not None:
+        # Keep lane-width estimate fresh (only update when both lines are solid)
+        if lx is not None and rx is not None and rx > lx + 50:
+            self._lane_width_px = 0.7 * self._lane_width_px + 0.3 * (rx - lx)
+        half_w = self._lane_width_px / 2.0
+
+        # Centre estimation:
+        # Two-line case: straightforward midpoint.
+        # Single-line case: the detected line could be the left or right boundary.
+        #   Using lx+half_w / rx-half_w directly trusts _choose_lanes classification,
+        #   which can be wrong on bends.  Instead, compute both interpretations and
+        #   pick whichever gives a centre closest to the previous frame (_last_centre
+        #   continuity).  This is robust even if classification flipped.
+        if lx is not None and rx is not None:
+            if lx >= rx:
+                lx = rx - self._lane_width_px
             self._last_lx = float(lx)
-        else:
-            lx = self._last_lx
-
-        if rx is not None:
             self._last_rx = float(rx)
+            lane_centre = (lx + rx) / 2.0
+        elif lx is not None:
+            ctr_as_left  = lx + half_w
+            ctr_as_right = lx - half_w
+            if abs(ctr_as_left - self._last_centre) <= abs(ctr_as_right - self._last_centre):
+                self._last_lx = float(lx)
+                lane_centre = ctr_as_left
+            else:                               # _choose_lanes misclassified: it's the right line
+                self._last_rx = float(lx)
+                lane_centre = ctr_as_right
+        elif rx is not None:
+            ctr_as_right = rx - half_w
+            ctr_as_left  = rx + half_w
+            if abs(ctr_as_right - self._last_centre) <= abs(ctr_as_left - self._last_centre):
+                self._last_rx = float(rx)
+                lane_centre = ctr_as_right
+            else:                               # _choose_lanes misclassified: it's the left line
+                self._last_lx = float(rx)
+                lane_centre = ctr_as_left
         else:
-            rx = self._last_rx
+            lane_centre = self._last_centre     # both lost — hold previous
 
-        if lx >= rx:    # crossed polys — fall back
-            lx, rx = self._last_lx, self._last_rx
-
-        lane_centre = (lx + rx) / 2.0
-        err_px      = self.bev_w / 2.0 - lane_centre
+        self._last_centre = lane_centre
+        err_px = self.bev_w / 2.0 - lane_centre
 
         lanes_active = (trust_l and lc is not None) or (trust_r and rc is not None)
         if lanes_active:

@@ -42,6 +42,7 @@ class StanleyController(Node):
 
         # ── State ─────────────────────────────────────────────────────────────
         self.e          = 0.0    # crosstrack error (m)
+        self.prev_e     = 0.0    # previous crosstrack error for derivative
         self.th_e       = 0.0   # heading error (rad)
         self.v_actual   = 0.1   # measured forward speed (m/s)
         self.smooth_steer = 0.0 # EMA-filtered steering angle (rad)
@@ -54,15 +55,16 @@ class StanleyController(Node):
         self.target_speed = 0.5   # m/s — safe starting speed (matches pure pursuit)
 
         # Stanley gains
-        # k      : crosstrack gain — crisped up to 1.8 for tighter lateral correction
-        # k_soft : softening constant — reduced to 0.4 for sharper response at low speed
-        self.k      = 1.8
+        self.k      = 1.0
         self.k_soft = 0.4
 
-        # 50% heading feed-forward — the heading error is now evaluated at a
-        # look-ahead row (~0.25 m ahead) in the detector, making it predictive
-        # enough to warrant a stronger weight here without causing oscillation.
-        self.heading_gain = 0.5
+        # Derivative look-ahead time (s): the camera's nearest visible point is
+        # some distance ahead of the car.  k_d * de/dt predicts where the error
+        # will be when the car reaches that point, so the correction fires at the
+        # right moment rather than overshooting.  0.15 s ≈ 7.5 cm at 0.5 m/s.
+        self.k_d = 0.15
+
+        self.heading_gain = 0.0
 
         self.max_steer = 0.5   # max steering angle (rad) — matches URDF joint limit
         self.alpha     = 0.5   # EMA weight — matches pure pursuit (double-filtered
@@ -100,10 +102,16 @@ class StanleyController(Node):
                                    throttle_duration_sec=1.0)
             return
 
-        # 1. Stanley steering law
-        #    δ = heading_gain·θ_e + arctan(k · e / (v + k_soft))
-        #    heading_gain=0 → pure crosstrack Stanley (no early-turn preview)
-        atan_term      = math.atan2(self.k * self.e, self.v_actual + self.k_soft)
+        # 1. Stanley steering law with derivative crosstrack term
+        #    e_pred = e + k_d * ė  — predicts error at the camera look-ahead point:
+        #    if the error is shrinking (car moving toward centre) the prediction is
+        #    smaller, so the correction backs off before overshooting.
+        DT = 0.05  # control period (s)
+        e_rate          = (self.e - self.prev_e) / DT
+        self.prev_e     = self.e
+        e_pred          = self.e + self.k_d * e_rate
+
+        atan_term      = math.atan2(self.k * e_pred, self.v_actual + self.k_soft)
         steering_angle = self.heading_gain * self.th_e + atan_term
 
         # 2. Clamp to physical steering limit
@@ -124,7 +132,7 @@ class StanleyController(Node):
         self.cmd_pub.publish(cmd)
 
         self.get_logger().info(
-            f'e={self.e:+.3f}m  θ_e={math.degrees(self.th_e):+.1f}°  '
+            f'e={self.e:+.3f}m  e_pred={e_pred:+.3f}m  '
             f'δ={math.degrees(self.smooth_steer):+.1f}°  '
             f'ω={yaw_rate:+.3f} rad/s  v={self.v_actual:.2f}m/s',
             throttle_duration_sec=0.5
