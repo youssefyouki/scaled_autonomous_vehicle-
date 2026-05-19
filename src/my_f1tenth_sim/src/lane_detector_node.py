@@ -53,25 +53,28 @@ class LaneDetector(Node):
         # Bottom source row extended to 390: raw rows 325-390 (beside/in-front
         # of the car) now warp into the bottom of the BEV.  The car body is blue
         # so its pixels are dark in CLAHE grayscale and ignored by peak detection.
-        self.src_pts = np.float32([[30, 390], [610, 390], [420, 248], [220, 248]])
+        # Top corners widened [220,248]-[420,248] → [160,248]-[480,248]:
+        # 200 px raw → 320 px raw, 60% more far-field lateral coverage so steep
+        # right/left boundaries no longer exit the BEV before enough rows are seen.
+        self.src_pts = np.float32([[30, 390], [610, 390], [480, 248], [160, 248]])
         self.dst_pts = np.float32([[0, 480],  [640, 480], [640, 0],   [0, 0]])
         self.M    = cv2.getPerspectiveTransform(self.src_pts, self.dst_pts)
         self.bev_w = 640
         self.bev_h = 480
 
         # ── Slice geometry (mirrors LaneAssist choose_455 for our BEV) ────────
-        _slices      = 20
+        _slices      = 32
         _bot_off     = 1   # 1 px margin so gray[bottom_row_index] is always valid
-        _bot_perc    = 0.5
+        _bot_perc    = 0.8  # scan 80% of BEV height so far-field curves are included
         self.bottom_row_index = self.bev_h - _bot_off                          # 479
-        _end          = int((1 - _bot_perc) * self.bev_h)                      # 240
+        _end          = int((1 - _bot_perc) * self.bev_h)                      # 96
         self.step     = int(-(self.bev_h * _bot_perc / _slices))               # -12
-        self.real_slices = int((_end - self.bottom_row_index) // self.step)    # 19
-        self.top_row_index = self.bottom_row_index + self.real_slices * self.step  # 242
-        self.height_norm   = np.linspace(0, 1, self.real_slices + 1)           # 20 values
+        self.real_slices = int((_end - self.bottom_row_index) // self.step)    # 31
+        self.top_row_index = self.bottom_row_index + self.real_slices * self.step  # 107
+        self.height_norm   = np.linspace(0, 1, self.real_slices + 1)           # 32 values
         self.slices = _slices
-        # Heading evaluated halfway up (~0.25 m ahead) for early curve anticipation.
-        self.y_hdg = self.bottom_row_index + (self.real_slices // 2) * self.step  # ≈ 362
+        # Heading evaluated 1/3 up the scan range (~0.35 m ahead).
+        self.y_hdg = self.bottom_row_index + (self.real_slices // 3) * self.step  # ≈ 355
 
         # ── Peak detection ────────────────────────────────────────────────────
         # Tuned for CLAHE-equalized grayscale; lane markings measure V ≈ 80–152.
@@ -93,8 +96,9 @@ class LaneDetector(Node):
         # ── Polynomial sanity ─────────────────────────────────────────────────
         # 0.2 (was 0.1) allows tighter-curve polynomials through; the original
         # LaneAssist value was calibrated for a wider-radius track.
-        self.extreme_coef_2 = 0.2   # |a| must be < 0.2 for 2nd-degree
-        self.extreme_coef_1 = 3.0   # |a| must be < 3.0 for 1st-degree
+        self.extreme_coef_3 = 0.001  # |a| must be < 0.001 for 3rd-degree
+        self.extreme_coef_2 = 0.2   # |a| must be < 0.2  for 2nd-degree
+        self.extreme_coef_1 = 3.0   # |a| must be < 3.0  for 1st-degree
 
         # ── Certainty / trust ─────────────────────────────────────────────────
         self.cert_from_peaks  = 0.5
@@ -112,6 +116,28 @@ class LaneDetector(Node):
         self._last_rx       = float(self.bev_w // 2 + 150)
         self._lane_width_px = float(self._last_rx - self._last_lx)  # ~300 px; updated when both lanes seen
         self._last_centre   = float(self.bev_w / 2.0)               # EMA of lane centre; single-line disambiguation
+
+        # ── Per-side mean_x trackers (dual-lane only) ────────────────────────
+        self._left_mean_x  = float(self.bev_w // 2 - 150)   # 170
+        self._right_mean_x = float(self.bev_w // 2 + 150)   # 470
+
+        # ── Single-lane classification lock ───────────────────────────────────
+        # Once set to 'left' or 'right', the single detected line keeps that
+        # classification until dual-lane detection returns and resets it to None.
+        self._single_side  = None
+        # Require this many consecutive dual-lane frames before releasing the
+        # lock — prevents a single noisy frame (crossing mark, parking line)
+        # from briefly triggering dual-lane mode and corrupting the lock state.
+        self._dual_count   = 0
+
+        # ── Polynomial holdout ────────────────────────────────────────────────
+        # When a lane polynomial disappears for a few frames, hold the last
+        # confirmed fit so heading stays accurate through brief blind spots.
+        self._held_lc   = None
+        self._held_rc   = None
+        self._lc_blind  = 0
+        self._rc_blind  = 0
+        self._max_blind = 8    # frames to hold (~0.4 s at 20 Hz)
 
         self.get_logger().info('Lane Detector (LaneAssist) started.')
 
@@ -307,44 +333,52 @@ class LaneDetector(Node):
         """Select most-right left-half lane and most-left right-half lane."""
         left, right = [], []
         lanes = [ln for ln in lanes if len(ln) >= self.min_peaks]
-        mid   = self.bev_w / 2.0
 
-        # Single track: assign to left or right using lane-centre continuity.
-        # _last_lx/_last_rx go stale during blind phases and fail when the line
-        # has moved far (e.g. sweeping across the BEV during a curve).
-        # Instead, compute both interpretations of where the lane CENTRE would be
-        # and pick whichever keeps it closest to the previous frame's centre.
-        if len(lanes) == 1:
-            lane   = lanes[0]
-            xs     = [p[0] for p in lane]
-            ys     = [p[1] for p in lane]
-            x_span = max(xs) - min(xs)
-            y_span = max(ys) - min(ys) if len(ys) > 1 else 0
-            if x_span > y_span:    # mostly horizontal — mean x avoids leftmost-end bias
-                ref_x = sum(xs) / len(xs)
-            else:                  # mostly vertical — bottommost point is nearest to car
-                ref_x = float(sorted(lane, key=lambda p: p[1], reverse=True)[0][0])
-            half_w = self._lane_width_px / 2.0
-            if abs(ref_x + half_w - self._last_centre) <= abs(ref_x - half_w - self._last_centre):
-                left = lane    # treating as left boundary gives centre closest to history
-            else:
-                right = lane
+        def mean_x(lane):
+            return sum(p[0] for p in lane) / len(lane)
+
+        if not lanes:
+            self._dual_count = 0
             return left, right
 
-        for lane in lanes:
-            n = len(lane)
-            if lane[0][0] <= mid:
-                if not left or n > self.slices * self.opt_perc or n > len(left):
-                    left = lane
+        if len(lanes) == 1:
+            self._dual_count = 0
+            lane = lanes[0]
+            if self._single_side is not None:
+                # Locked: keep the same side until dual-lane detection comes back.
+                left  = lane if self._single_side == 'left'  else []
+                right = lane if self._single_side == 'right' else []
             else:
-                if not right:
-                    right = lane
-                    if n > self.slices * self.opt_perc:
-                        break
-                    continue
-                if n > self.slices * self.opt_perc:
-                    right = lane
-                    break
+                # First single-lane frame after dual — classify once by position,
+                # then lock.  _left_mean_x/_right_mean_x are frozen at the last
+                # dual-lane values so this comparison is reliable.
+                ref_x = mean_x(lane)
+                if abs(ref_x - self._left_mean_x) <= abs(ref_x - self._right_mean_x):
+                    left  = lane;  self._single_side = 'left'
+                else:
+                    right = lane;  self._single_side = 'right'
+            return left, right
+
+        # ≥ 2 lanes — dual-lane detection.
+        # Only release the single-lane lock after 2 consecutive dual-lane frames
+        # so that one noisy frame (crossing mark, parking line) can't break it.
+        self._dual_count += 1
+        if self._dual_count >= 2:
+            self._single_side = None
+
+        # Classify by proximity to last known per-side mean_x rather than a
+        # fixed BEV-centre split — on curves lines can cross x=320 and the old
+        # threshold flips left↔right.  Pick the best-matching lane for each side,
+        # excluding the left pick from the right candidate pool.
+        lanes_mx = [(ln, mean_x(ln)) for ln in lanes]
+        left  = min(lanes_mx, key=lambda t: abs(t[1] - self._left_mean_x))[0]
+        rest  = [t for t in lanes_mx if t[0] is not left]
+        right = min(rest, key=lambda t: abs(t[1] - self._right_mean_x))[0] if rest else []
+
+        # Sanity: left boundary must lie left of right boundary overall.
+        if left and right and mean_x(left) > mean_x(right):
+            left, right = right, left
+
         return left, right
 
     def _lstsq_poly(self, pts, degree):
@@ -357,25 +391,52 @@ class LaneDetector(Node):
     def _check_coefs(self, coef):
         if coef is None:
             return None
-        limits = {3: self.extreme_coef_2, 2: self.extreme_coef_1}
+        limits = {4: self.extreme_coef_3, 3: self.extreme_coef_2, 2: self.extreme_coef_1}
         return coef if abs(coef[0]) < limits[len(coef)] else None
 
+    @staticmethod
+    def _poly_eval(coef, y):
+        """Evaluate polynomial via Horner's method; works for any degree."""
+        result = 0.0
+        for c in coef:
+            result = result * y + c
+        return result
+
+    @staticmethod
+    def _poly_slope(coef, y):
+        """Analytical derivative dx/dy for any degree polynomial."""
+        n = len(coef) - 1          # degree
+        slope = 0.0
+        for i, c in enumerate(coef[:-1]):
+            power = n - i
+            slope += power * c * (y ** (power - 1))
+        return slope
+
     def _fit_poly(self, lane):
-        """Fit 2nd-degree polynomial to lane points; fall back to 1st-degree if sparse."""
+        """Fit 3rd-degree polynomial; fall back to 2nd then 1st when points are sparse."""
         if not lane:
             return None
         pts = [[p[1], p[0]] for p in lane]     # [[y, x], ...]
-        if len(pts) > self.slices * 0.3:        # enough points → quadratic
-            return self._check_coefs(self._lstsq_poly(pts, 2))
+        n = len(pts)
+        if n >= 7:                              # ≥ 7 points → try cubic
+            c3 = self._check_coefs(self._lstsq_poly(pts, 3))
+            if c3 is not None:
+                return c3                      # 4-element [a,b,c,d]
+            c2 = self._check_coefs(self._lstsq_poly(pts, 2))
+            if c2 is not None:
+                return c2                      # 3-element [a,b,c]
         coef1 = self._check_coefs(self._lstsq_poly(pts, 1))
         if coef1 is not None:
-            return np.array([0.0, coef1[0], coef1[1]])
+            return np.array([0.0, coef1[0], coef1[1]])   # padded to 3-element
         return None
 
     def _certainty(self, new_c, prev_c, peaks):
         if new_c is None or prev_c is None:
             return 0.0
-        sim  = max(0.0, 100.0 - float(np.sqrt(np.mean((new_c - prev_c) ** 2))))
+        if len(new_c) != len(prev_c):          # degree changed between frames → no similarity score
+            sim = 0.0
+        else:
+            sim = max(0.0, 100.0 - float(np.sqrt(np.mean((new_c - prev_c) ** 2))))
         ppct = len(peaks) / self.real_slices * 100.0
         return round(self.cert_from_peaks * ppct + (1.0 - self.cert_from_peaks) * sim, 2)
 
@@ -415,6 +476,13 @@ class LaneDetector(Node):
         lanes, peaks = self._peaks_detection(gray_eq)
         left, right  = self._choose_lanes(lanes)
 
+        # Update fallback mean_x EMAs only on confirmed dual-lane frames
+        # (_dual_count ≥ 2) — single noisy frames (crossings, parking marks)
+        # can't corrupt the anchors used for single-lane lock classification.
+        if left and right and self._dual_count >= 2:
+            self._left_mean_x  = 0.8 * self._left_mean_x  + 0.2 * (sum(p[0] for p in left)  / len(left))
+            self._right_mean_x = 0.8 * self._right_mean_x + 0.2 * (sum(p[0] for p in right) / len(right))
+
         # 5. Adaptive min_height — mirror of lanes_detection in detect.py
         if peaks:
             hl = [gray_eq[y][x] for x, y in left]
@@ -432,6 +500,21 @@ class LaneDetector(Node):
 
         # 7. Certainty / trust
         lc, rc, l_cert, r_cert, trust_l, trust_r = self._post_process(lc, left, rc, right)
+
+        # Polynomial holdout: when a lane disappears briefly, substitute the last
+        # confirmed polynomial so heading stays accurate through the blind frames.
+        if lc is not None and trust_l:
+            self._held_lc  = lc;  self._lc_blind = 0
+        else:
+            self._lc_blind += 1
+            if self._lc_blind <= self._max_blind:
+                lc = self._held_lc;  trust_l = lc is not None
+        if rc is not None and trust_r:
+            self._held_rc  = rc;  self._rc_blind = 0
+        else:
+            self._rc_blind += 1
+            if self._rc_blind <= self._max_blind:
+                rc = self._held_rc;  trust_r = rc is not None
 
         # 8. Crosstrack error — use raw near-field points (bottom 3 slices).
         #    With _bot_off=1, bottom_row_index=479; cutoff_y = 479+3*(-12) = 443.
@@ -466,22 +549,20 @@ class LaneDetector(Node):
             self._last_rx = float(rx)
             lane_centre = (lx + rx) / 2.0
         elif lx is not None:
+            # _last_lx/_last_rx NOT updated here — keep dual-lane anchors intact so
+            # the next single-lane frame can still use them for disambiguation.
             ctr_as_left  = lx + half_w
             ctr_as_right = lx - half_w
             if abs(ctr_as_left - self._last_centre) <= abs(ctr_as_right - self._last_centre):
-                self._last_lx = float(lx)
                 lane_centre = ctr_as_left
-            else:                               # _choose_lanes misclassified: it's the right line
-                self._last_rx = float(lx)
+            else:
                 lane_centre = ctr_as_right
         elif rx is not None:
             ctr_as_right = rx - half_w
             ctr_as_left  = rx + half_w
             if abs(ctr_as_right - self._last_centre) <= abs(ctr_as_left - self._last_centre):
-                self._last_rx = float(rx)
                 lane_centre = ctr_as_right
-            else:                               # _choose_lanes misclassified: it's the left line
-                self._last_lx = float(rx)
+            else:
                 lane_centre = ctr_as_left
         else:
             lane_centre = self._last_centre     # both lost — hold previous
@@ -503,7 +584,7 @@ class LaneDetector(Node):
         #    Evaluating mid-scan rather than at the car's position gives curve anticipation:
         #    the derivative already reflects the upcoming bend before crosstrack error builds.
         def poly_slope(coef):
-            return 2.0 * coef[0] * self.y_hdg + coef[1]   # dx/dy at look-ahead row
+            return self._poly_slope(coef, self.y_hdg)      # dx/dy at look-ahead row
 
         slopes = []
         if trust_l and lc is not None:
@@ -560,13 +641,11 @@ class LaneDetector(Node):
         def draw_coef(coef, col):
             if coef is None:
                 return
-            a, b, c = coef
             for i in range(self.bottom_row_index, end_y, -3):
-                x0 = int(a * i**2 + b * i + c)
-                k  = i - 3
-                x1 = int(a * k**2 + b * k + c)
+                x0 = int(self._poly_eval(coef, i))
+                x1 = int(self._poly_eval(coef, i - 3))
                 if 0 <= x0 < W and 0 <= x1 < W:
-                    cv2.line(out, (x0, i), (x1, k), col, 2)
+                    cv2.line(out, (x0, i), (x1, i - 3), col, 2)
 
         draw_coef(lc if trust_l else None, (255, 128, 0))
         draw_coef(rc if trust_r else None, (0, 128, 255))
