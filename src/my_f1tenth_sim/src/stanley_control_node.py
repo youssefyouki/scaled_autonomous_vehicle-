@@ -23,6 +23,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import SetParametersResult
 import math
 
 
@@ -42,6 +43,7 @@ class StanleyController(Node):
 
         # ── State ─────────────────────────────────────────────────────────────
         self.e          = 0.0    # crosstrack error (m)
+        self.prev_e     = 0.0    # previous crosstrack error for derivative
         self.th_e       = 0.0   # heading error (rad)
         self.v_actual   = 0.1   # measured forward speed (m/s)
         self.smooth_steer = 0.0 # EMA-filtered steering angle (rad)
@@ -54,11 +56,16 @@ class StanleyController(Node):
         self.target_speed = 0.5   # m/s — safe starting speed (matches pure pursuit)
 
         # Stanley gains
-        # k      : crosstrack gain — higher = more aggressive lateral correction
-        # k_soft : softening constant — prevents division-by-zero and reduces
-        #          oscillation at low speeds (increase if car wiggles at <0.3 m/s)
-        self.k      = 1.5
-        self.k_soft = 0.5
+        self.k      = 1.0
+        self.k_soft = 0.4
+
+        # Derivative look-ahead time (s): the camera's nearest visible point is
+        # some distance ahead of the car.  k_d * de/dt predicts where the error
+        # will be when the car reaches that point, so the correction fires at the
+        # right moment rather than overshooting.  0.15 s ≈ 7.5 cm at 0.5 m/s.
+        self.k_d = 0.15
+
+        self.heading_gain = 0.0
 
         self.max_steer = 0.5   # max steering angle (rad) — matches URDF joint limit
         self.alpha     = 0.5   # EMA weight — matches pure pursuit (double-filtered
@@ -67,9 +74,31 @@ class StanleyController(Node):
         # ── Vehicle Geometry (from car.xacro) ─────────────────────────────────
         self.wheelbase = 0.28   # metres
 
+        # ── ROS2 parameter declarations (enables live tuning via controller panel)
+        self.declare_parameter('target_speed', self.target_speed)
+        self.declare_parameter('k',            self.k)
+        self.declare_parameter('k_soft',       self.k_soft)
+        self.declare_parameter('k_d',          self.k_d)
+        self.declare_parameter('heading_gain', self.heading_gain)
+        self.declare_parameter('max_steer',    self.max_steer)
+        self.declare_parameter('alpha',        self.alpha)
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         # Control loop at 20 Hz
         self.timer = self.create_timer(0.05, self.control_loop)
         self.get_logger().info('Stanley Controller started.')
+
+    # ── Parameter callback ────────────────────────────────────────────────────
+    def _on_param_change(self, params):
+        for p in params:
+            if   p.name == 'target_speed': self.target_speed = p.value
+            elif p.name == 'k':            self.k = p.value
+            elif p.name == 'k_soft':       self.k_soft = p.value
+            elif p.name == 'k_d':          self.k_d = p.value
+            elif p.name == 'heading_gain': self.heading_gain = p.value
+            elif p.name == 'max_steer':    self.max_steer = p.value
+            elif p.name == 'alpha':        self.alpha = p.value
+        return SetParametersResult(successful=True)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     def crosstrack_cb(self, msg: Float32):
@@ -96,10 +125,17 @@ class StanleyController(Node):
                                    throttle_duration_sec=1.0)
             return
 
-        # 1. Stanley steering law
-        #    δ = θ_e + arctan(k · e / (v + k_soft))
-        atan_term     = math.atan2(self.k * self.e, self.v_actual + self.k_soft)
-        steering_angle = self.th_e + atan_term
+        # 1. Stanley steering law with derivative crosstrack term
+        #    e_pred = e + k_d * ė  — predicts error at the camera look-ahead point:
+        #    if the error is shrinking (car moving toward centre) the prediction is
+        #    smaller, so the correction backs off before overshooting.
+        DT = 0.05  # control period (s)
+        e_rate          = (self.e - self.prev_e) / DT
+        self.prev_e     = self.e
+        e_pred          = self.e + self.k_d * e_rate
+
+        atan_term      = math.atan2(self.k * e_pred, self.v_actual + self.k_soft)
+        steering_angle = self.heading_gain * self.th_e + atan_term
 
         # 2. Clamp to physical steering limit
         steering_angle = max(-self.max_steer, min(self.max_steer, steering_angle))
@@ -119,7 +155,7 @@ class StanleyController(Node):
         self.cmd_pub.publish(cmd)
 
         self.get_logger().info(
-            f'e={self.e:+.3f}m  θ_e={math.degrees(self.th_e):+.1f}°  '
+            f'e={self.e:+.3f}m  e_pred={e_pred:+.3f}m  '
             f'δ={math.degrees(self.smooth_steer):+.1f}°  '
             f'ω={yaw_rate:+.3f} rad/s  v={self.v_actual:.2f}m/s',
             throttle_duration_sec=0.5
