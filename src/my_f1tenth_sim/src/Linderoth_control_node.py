@@ -35,6 +35,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import SetParametersResult
 
 
 class LinderothController(Node):
@@ -107,10 +108,35 @@ class LinderothController(Node):
         # ── Vehicle geometry (from car.xacro) ─────────────────────────────────
         self.wheelbase = 0.28   # metres
 
+        # ── ROS2 parameter declarations (enables live tuning via controller panel)
+        self.declare_parameter('k1',            self.k1)
+        self.declare_parameter('k2',            self.k2)
+        self.declare_parameter('v_ref',         self.v_ref)
+        self.declare_parameter('heading_scale', self.heading_scale)
+        self.declare_parameter('alpha',         self.alpha)
+        self.declare_parameter('max_steer',     self.max_steer)
+        self.declare_parameter('Kp',            self.Kp)
+        self.declare_parameter('Ki',            self.Ki)
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         # ── Control loop at 20 Hz ─────────────────────────────────────────────
         self.DT    = 0.05
         self.timer = self.create_timer(self.DT, self.control_loop)
         self.get_logger().info('Linderoth Controller started.')
+
+    # ── Parameter callback ────────────────────────────────────────────────────
+
+    def _on_param_change(self, params):
+        for p in params:
+            if   p.name == 'k1':            self.k1 = p.value
+            elif p.name == 'k2':            self.k2 = p.value
+            elif p.name == 'v_ref':         self.v_ref = p.value
+            elif p.name == 'heading_scale': self.heading_scale = p.value
+            elif p.name == 'alpha':         self.alpha = p.value
+            elif p.name == 'max_steer':     self.max_steer = p.value
+            elif p.name == 'Kp':            self.Kp = p.value
+            elif p.name == 'Ki':            self.Ki = p.value
+        return SetParametersResult(successful=True)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 

@@ -610,13 +610,13 @@ class LaneDetector(Node):
         self.th_pub.publish(th_msg)
 
         # 11. Debug visualisation
-        self._show(gray_eq, warped, left, right, lc, rc,
+        self._show(gray_eq, left, right, lc, rc,
                    trust_l, trust_r, l_cert, r_cert,
                    peaks, lane_centre, hdg)
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _show(self, gray_eq, warped, left, right, lc, rc,
+    def _show(self, gray_eq, left, right, lc, rc,
               trust_l, trust_r, l_cert, r_cert, peaks, lane_centre, hdg):
         out = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
         H, W = out.shape[:2]
@@ -665,8 +665,6 @@ class LaneDetector(Node):
                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
         cv2.imshow('LaneAssist peaks', out)
-        cv2.imshow('CLAHE gray',       gray_eq)
-        cv2.imshow('BEV warped',       warped)
         cv2.waitKey(1)
 
 

@@ -19,6 +19,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import SetParametersResult
 import math
 
 
@@ -64,9 +65,31 @@ class PurePursuitController(Node):
         # ── Vehicle Geometry (from car.xacro) ─────────────────────────────────
         self.wheelbase = 0.28   # metres
 
+        # ── ROS2 parameter declarations (enables live tuning via controller panel)
+        self.declare_parameter('target_speed', self.target_speed)
+        self.declare_parameter('k',            self.k)
+        self.declare_parameter('k_soft',       self.k_soft)
+        self.declare_parameter('k_d',          self.k_d)
+        self.declare_parameter('heading_gain', self.heading_gain)
+        self.declare_parameter('max_steer',    self.max_steer)
+        self.declare_parameter('alpha',        self.alpha)
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         # Control loop at 20 Hz
         self.timer = self.create_timer(0.05, self.control_loop)
         self.get_logger().info('Pure Pursuit Controller started.')
+
+    # ── Parameter callback ────────────────────────────────────────────────────
+    def _on_param_change(self, params):
+        for p in params:
+            if   p.name == 'target_speed': self.target_speed = p.value
+            elif p.name == 'k':            self.k = p.value
+            elif p.name == 'k_soft':       self.k_soft = p.value
+            elif p.name == 'k_d':          self.k_d = p.value
+            elif p.name == 'heading_gain': self.heading_gain = p.value
+            elif p.name == 'max_steer':    self.max_steer = p.value
+            elif p.name == 'alpha':        self.alpha = p.value
+        return SetParametersResult(successful=True)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     def crosstrack_cb(self, msg: Float32):
