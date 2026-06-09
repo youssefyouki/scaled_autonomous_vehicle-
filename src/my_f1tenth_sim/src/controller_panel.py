@@ -23,10 +23,12 @@ parameter changes to the running node through the ROS2 SetParameters service.
 
 import math
 import os
+import queue
 import signal
 import subprocess
 import threading
 import tkinter as tk
+import yaml
 
 import rclpy
 from rcl_interfaces.msg import Parameter as RosParam
@@ -36,8 +38,6 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
-from gazebo_msgs.srv import SetEntityState
-from gazebo_msgs.msg import EntityState
 
 # ── Controller registry ────────────────────────────────────────────────────────
 # Each entry: (param_name, default, min, max, resolution, display_label)
@@ -47,36 +47,31 @@ CONTROLLERS = {
         'executable': 'pure_pursuit_node.py',
         'node_name':  'pure_pursuit_controller',
         'params': [
-            ('target_speed', 0.50, 0.10, 1.50, 0.01, 'Speed      (m/s)'),
-            ('k',            1.00, 0.10, 5.00, 0.10, 'k          crosstrack gain'),
-            ('k_soft',       0.40, 0.01, 2.00, 0.01, 'k_soft'),
-            ('k_d',          0.15, 0.00, 1.00, 0.01, 'k_d        derivative'),
-            ('alpha',        0.50, 0.00, 1.00, 0.05, 'alpha      EMA smoothing'),
+            # (name, default, min, max, resolution, label)
+            ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
+            ('lookahead_dist', 0.30, 0.05, 1.00, 0.01, 'Lookahead     (m)'),
+            ('alpha',          0.50, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
     'Stanley': {
         'executable': 'stanley_control_node.py',
         'node_name':  'stanley_controller',
         'params': [
-            ('target_speed',  0.50, 0.10, 1.50, 0.01, 'Speed      (m/s)'),
-            ('k',             1.00, 0.10, 5.00, 0.10, 'k          crosstrack gain'),
-            ('k_soft',        0.40, 0.01, 2.00, 0.01, 'k_soft'),
-            ('k_d',           0.15, 0.00, 1.00, 0.01, 'k_d        derivative'),
-            ('heading_gain',  0.00, 0.00, 2.00, 0.10, 'heading_gain'),
-            ('alpha',         0.50, 0.00, 1.00, 0.05, 'alpha      EMA smoothing'),
+            ('target_speed', 0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
+            ('k',            1.00, 0.10, 5.00, 0.10, 'k             crosstrack gain'),
+            ('k_soft',       0.40, 0.01, 2.00, 0.01, 'k_soft        low-speed softening'),
+            ('alpha',        0.50, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
     'Linderoth': {
         'executable': 'Linderoth_control_node.py',
         'node_name':  'linderoth_controller',
         'params': [
-            ('k1',            0.30, 0.01, 2.00, 0.01, 'k1         lateral'),
-            ('k2',            0.60, 0.01, 2.00, 0.01, 'k2         lateral'),
-            ('v_ref',         0.35, 0.10, 1.50, 0.01, 'v_ref      (m/s)'),
-            ('heading_scale', 0.40, 0.00, 1.50, 0.05, 'heading_scale'),
-            ('Kp',            0.80, 0.10, 5.00, 0.10, 'Kp         speed PI'),
-            ('Ki',            0.10, 0.00, 2.00, 0.05, 'Ki         speed PI'),
-            ('alpha',         0.40, 0.00, 1.00, 0.05, 'alpha      EMA smoothing'),
+            ('target_speed',   0.35, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
+            ('k1',             0.30, 0.01, 2.00, 0.01, 'k1            stability gain'),
+            ('k2',             0.60, 0.01, 2.00, 0.01, 'k2            crosstrack gain'),
+            ('heading_scale',  0.00, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
+            ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
 }
@@ -95,63 +90,77 @@ TROUGH = '#181825'
 # ── ROS2 side ──────────────────────────────────────────────────────────────────
 
 class PanelNode(Node):
-    """Subscribes to perception topics; exposes a fire-and-forget set_param()."""
+    """ROS2 node side of the panel."""
 
     def __init__(self):
         super().__init__('controller_panel')
         self.cte = 0.0
         self.hdg = 0.0
+        self._current_pose = Pose()
+
         self.create_subscription(Float32, '/perception/crosstrack_error',
                                  lambda m: setattr(self, 'cte', m.data), 10)
         self.create_subscription(Float32, '/perception/heading_error',
                                  lambda m: setattr(self, 'hdg', m.data), 10)
-        self._current_pose = Pose()
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
-        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self._set_state_client = self.create_client(
-            SetEntityState, '/gazebo/set_entity_state')
-        self._clients: dict[str, object] = {}
 
-        # Timer-based stop: publishes zero cmd_vel from inside the executor
-        self._stop_ticks_remaining = 0
-        self.create_timer(0.05, self._stop_timer_cb)   # 20 Hz
+        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # Pre-create one SetParameters client per controller — all done in
+        # __init__ (executor thread) so rclpy node ops stay thread-safe.
+        self._param_clients = {
+            info['node_name']: self.create_client(
+                SetParameters, f'/{info["node_name"]}/set_parameters')
+            for info in CONTROLLERS.values()
+        }
+
+        # Queue lets the tkinter thread post param updates; the 20 Hz timer
+        # drains it inside the executor so all ROS calls stay on one thread.
+        self._param_queue: queue.Queue = queue.Queue()
+
+        # When True the tick loop continuously publishes zero cmd_vel.
+        # Starts True so the car is held still before any controller is started.
+        self._holding_stop = True
+        self.create_timer(0.05, self._tick)   # 20 Hz
+
+    # ── Timer tick (runs inside rclpy executor) ───────────────────────────────
+
+    def _tick(self):
+        # 1. Drain parameter update queue
+        while not self._param_queue.empty():
+            try:
+                node_name, param_name, value = self._param_queue.get_nowait()
+            except queue.Empty:
+                break
+            client = self._param_clients.get(node_name)
+            if client and client.service_is_ready():
+                pv = ParameterValue()
+                pv.type = ParameterType.PARAMETER_DOUBLE
+                pv.double_value = float(value)
+                req = SetParameters.Request()
+                req.parameters = [RosParam(name=param_name, value=pv)]
+                client.call_async(req)
+
+        # 2. Continuous zero hold while no controller is running
+        if self._holding_stop:
+            self._cmd_pub.publish(Twist())
+
+    # ── Public API (safe to call from tkinter thread) ─────────────────────────
 
     def _odom_cb(self, msg: Odometry):
         self._current_pose = msg.pose.pose
 
-    def _stop_timer_cb(self):
-        if self._stop_ticks_remaining > 0:
-            self._cmd_pub.publish(Twist())
-            self._stop_ticks_remaining -= 1
+    def set_param(self, node_name: str, param_name: str, value: float):
+        """Thread-safe: enqueue a parameter update for the executor to send."""
+        self._param_queue.put((node_name, param_name, value))
+
+    def controller_started(self):
+        """Call when a controller subprocess is launched — releases the zero hold."""
+        self._holding_stop = False
 
     def publish_stop(self):
-        """Zero cmd_vel immediately + teleport-freeze the car via set_entity_state."""
-        self._cmd_pub.publish(Twist())
-        self._stop_ticks_remaining = 20
-        # Zero out physics velocity directly so the car doesn't coast
-        if self._set_state_client.service_is_ready():
-            state = EntityState()
-            state.name = 'my_f1tenth'
-            state.pose = self._current_pose
-            state.twist = Twist()          # zero linear + angular velocity
-            state.reference_frame = 'world'
-            req = SetEntityState.Request()
-            req.state = state
-            self._set_state_client.call_async(req)
-
-    def set_param(self, node_name: str, param_name: str, value: float):
-        if node_name not in self._clients:
-            self._clients[node_name] = self.create_client(
-                SetParameters, f'/{node_name}/set_parameters')
-        client = self._clients[node_name]
-        if not client.service_is_ready():
-            return
-        pv = ParameterValue()
-        pv.type = ParameterType.PARAMETER_DOUBLE
-        pv.double_value = float(value)
-        req = SetParameters.Request()
-        req.parameters = [RosParam(name=param_name, value=pv)]
-        client.call_async(req)
+        """Re-engage the continuous zero hold."""
+        self._holding_stop = True
 
 
 # ── GUI side ───────────────────────────────────────────────────────────────────
@@ -227,6 +236,12 @@ class ControllerPanel:
             btn_row, text='■  Stop', command=self._stop,
             bg='#d20f39', fg='white', font=('Courier', 10, 'bold'),
             relief='flat', padx=10, pady=2,
+        ).pack(side='left', padx=(0, 6))
+
+        tk.Button(
+            btn_row, text='💾  Save Config', command=self._save_config,
+            bg='#7287fd', fg='white', font=('Courier', 10, 'bold'),
+            relief='flat', padx=10, pady=2,
         ).pack(side='left', padx=(0, 12))
 
         self.status_lbl = tk.Label(
@@ -277,6 +292,7 @@ class ControllerPanel:
             self._param_frames[ctrl_name] = frame
 
         self._on_ctrl_select()   # show the default controller's params
+        self._load_config()      # restore saved values if file exists
 
         self._sep(self.root)
 
@@ -299,6 +315,42 @@ class ControllerPanel:
         self.hdg_lbl = tk.Label(row, text='  +0.0 °', width=10,
                                 bg=BG, fg=GREEN, font=('Courier', 10, 'bold'))
         self.hdg_lbl.pack(side='left', padx=4)
+
+    # ── Config save / load ────────────────────────────────────────────────────
+
+    CONFIG_FILE = os.path.expanduser('~/.ros/f1tenth_controller_params.yaml')
+
+    def _save_config(self):
+        config = {
+            ctrl: {pname: var.get() for pname, var in sliders.items()}
+            for ctrl, sliders in self._slider_vars.items()
+        }
+        os.makedirs(os.path.dirname(self.CONFIG_FILE), exist_ok=True)
+        with open(self.CONFIG_FILE, 'w') as f:
+            yaml.dump(config, f)
+        self.status_lbl.config(text='✔ Config saved', fg=GREEN)
+        self.root.after(2000, self._restore_status_label)
+
+    def _load_config(self):
+        if not os.path.exists(self.CONFIG_FILE):
+            return
+        try:
+            with open(self.CONFIG_FILE) as f:
+                config = yaml.safe_load(f) or {}
+            for ctrl, params in config.items():
+                if ctrl not in self._slider_vars:
+                    continue
+                for pname, value in params.items():
+                    if pname in self._slider_vars[ctrl]:
+                        self._slider_vars[ctrl][pname].set(float(value))
+        except Exception:
+            pass  # corrupt file — silently ignore
+
+    def _restore_status_label(self):
+        if self.active_ctrl:
+            self.status_lbl.config(text=f'● {self.active_ctrl}', fg=GREEN)
+        else:
+            self.status_lbl.config(text='● STOPPED', fg=RED)
 
     # ── Events ────────────────────────────────────────────────────────────────
 
@@ -328,6 +380,7 @@ class ControllerPanel:
             env=os.environ.copy(),
             start_new_session=True,
         )
+        self.node.controller_started()   # release zero hold so controller drives
         self.active_ctrl = name
         self.status_lbl.config(text=f'● {name}', fg=GREEN)
 
@@ -340,7 +393,11 @@ class ControllerPanel:
         threading.Thread(target=proc.wait, daemon=True).start()
 
     def _stop(self):
-        self.node.publish_stop()        # zero published before process dies
+        # Publish zeros immediately from this thread — rclpy publishers are thread-safe.
+        # Do this before killing the process so zeros arrive before the controller's
+        # last message drains from the DDS queue.
+        self.node._cmd_pub.publish(Twist())
+        self.node.publish_stop()        # engage continuous zero hold
         if self.proc is not None:
             proc = self.proc
             self.proc = None
@@ -357,6 +414,11 @@ class ControllerPanel:
     def _refresh(self):
         self.cte_lbl.config(text=f'{self.node.cte:+.3f} m')
         self.hdg_lbl.config(text=f'{math.degrees(self.node.hdg):+.1f} °')
+
+        # Backup zero hold: also publish from the tkinter thread at 10 Hz so
+        # the car stays still even if the rclpy spin thread is momentarily busy.
+        if self.active_ctrl is None:
+            self.node._cmd_pub.publish(Twist())
 
         # detect subprocess crash
         if self.proc is not None and self.proc.poll() is not None:
@@ -375,7 +437,15 @@ class ControllerPanel:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _kill_stale_controllers():
+    """Kill any leftover controller processes from a previous session."""
+    for exe in ['pure_pursuit_node.py', 'stanley_control_node.py',
+                'Linderoth_control_node.py']:
+        subprocess.run(['pkill', '-9', '-f', exe], capture_output=True)
+
+
 def main(args=None):
+    _kill_stale_controllers()
     rclpy.init(args=args)
     ros_node = PanelNode()
 

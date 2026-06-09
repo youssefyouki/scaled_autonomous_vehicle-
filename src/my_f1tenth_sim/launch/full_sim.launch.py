@@ -61,17 +61,13 @@ def generate_launch_description():
         ],
     )
 
-    # ── 3. Controller panel GUI ───────────────────────────────────────────────
-    controller_panel = TimerAction(
-        period=12.0,
-        actions=[
-            Node(
-                package='my_f1tenth_sim',
-                executable='controller_panel.py',
-                name='controller_panel',
-                output='screen',
-            )
-        ],
+    # ── 3. Controller panel GUI — starts immediately so zeros are published
+    #       before Gazebo physics begins moving the car.
+    controller_panel = Node(
+        package='my_f1tenth_sim',
+        executable='controller_panel.py',
+        name='controller_panel',
+        output='screen',
     )
 
     return LaunchDescription([

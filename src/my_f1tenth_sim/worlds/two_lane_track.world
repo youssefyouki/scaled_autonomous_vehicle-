@@ -84,10 +84,6 @@
 
     <scene><ambient>0.5 0.5 0.5 1</ambient></scene>
 
-    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
-      <ros><namespace>/gazebo</namespace></ros>
-      <update_rate>100.0</update_rate>
-    </plugin>
 
   </world>
 </sdf>
