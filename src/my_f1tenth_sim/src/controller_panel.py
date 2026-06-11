@@ -68,8 +68,8 @@ CONTROLLERS = {
         'node_name':  'linderoth_controller',
         'params': [
             ('target_speed',   0.35, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
-            ('k1',             0.30, 0.01, 2.00, 0.01, 'k1            stability gain'),
-            ('k2',             0.60, 0.01, 2.00, 0.01, 'k2            crosstrack gain'),
+            ('k1',             1.00, 0.01, 3.00, 0.05, 'k1            centre-return gain'),
+            ('k2',             1.00, 0.01, 3.00, 0.05, 'k2            crosstrack gain'),
             ('heading_scale',  0.00, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
             ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],

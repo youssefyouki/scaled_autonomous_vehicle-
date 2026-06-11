@@ -2,23 +2,44 @@
 """
 Linderoth (2008) Lane-Keeping Controller
 ==========================================
-Lateral law from Linderoth 2008, eq. 4.53, with an explicit heading_scale
-parameter that controls how much of the (anticipatory) heading error enters
-the formula.
+Lateral law from Linderoth 2008, eq. 4.53 (curvilinear representation).
 
-  heading_scale = 0.0  →  pure crosstrack:  δ = atan(e_n / k2)
-  heading_scale = 1.0  →  full Linderoth formula with look-ahead heading
+  e_n   = lateral crosstrack error from lane centre (m)
+  e_th  = heading error relative to road tangent    (rad)
+  k1    = centre-return gain   (start: 1.0)
+  k2    = crosstrack gain      (start: 1.0)
 
-The look-ahead heading from the lane detector reflects upcoming bends before
-crosstrack error builds; this causes early turning that cannot be tuned away
-with k1/k2 alone.  heading_scale lets you dial that anticipation from zero up.
+RAW FORMULA (from thesis):
+  num =  -cos(e_th)*e_n  -  (k1+k2)*sin(e_th)
+  den =   k1  -  (k1+k2)*cos(e_th)  +  sin(e_th)*e_n
+  δ   =  atan(num / den)
 
-Lateral law:
-  e_th_in     = heading_scale * heading_error   (heading_error negated for convention)
-  numerator   = -cos(e_th_in)*e_n - (k1+k2)*sin(e_th_in)
-  denominator =  k1 - (k1+k2)*cos(e_th_in) + sin(e_th_in)*e_n
-  delta       = atan(numerator / denominator)
-  omega       = v * tan(delta) / L
+EQUILIBRIUM CHECK (e_n=0, e_th=0):
+  num = 0
+  den = k1 - (k1+k2) = -k2   ← ALWAYS NEGATIVE at rest
+
+  atan(0 / -k2) = 0  ✓  (atan of zero is always zero — accidentally correct)
+  atan2(0, -k2) = π  ✗  (atan2 with negative den reads the wrong quadrant)
+
+  The original atan works at equilibrium but fails on curves when den flips
+  sign mid-range (wrong quadrant → wrong-direction steering correction).
+
+CORRECT FIX — negate both num and den before atan2:
+  atan2(-num, -den) = atan2(0, +k2) = 0  ✓  at equilibrium
+  And atan2 now handles any quadrant correctly on curves.
+
+Equivalent rewrite:
+  num2 =  cos(e_th)*e_n  +  (k1+k2)*sin(e_th)
+  den2 =  (k1+k2)*cos(e_th)  -  sin(e_th)*e_n  -  k1
+  δ    =  atan2(num2, den2)
+
+  den2 at equilibrium = (k1+k2) - k1 = k2 > 0  ✓
+
+Tuning sequence:
+  1. heading_scale=0, k1=1.0, k2=1.0 → verify crosstrack correction on a straight
+  2. Adjust k2 (tighter centering) / k1 (damp oscillation) until straight is stable
+  3. Raise heading_scale toward 1.0 for curve anticipation
+  4. If heading correction acts backwards, set heading_scale negative (e.g. -0.5)
 """
 import math
 import rclpy
@@ -48,12 +69,16 @@ class LinderothController(Node):
         self.last_perception_stamp = self.get_clock().now()
         self.PERCEPTION_TIMEOUT_S  = 1.0
 
+        # ── Tunable parameters ─────────────────────────────────────────────
         self.target_speed   = 0.35   # m/s
-        self.k1             = 0.3    # lateral stability gain  (must be < k2)
-        self.k2             = 0.6    # crosstrack sensitivity
-        self.heading_scale  = 0.0    # 0 = pure crosstrack, 1 = full anticipatory heading
-        self.alpha          = 0.4    # EMA smoothing weight
-        self.max_steer      = 0.5    # rad
+        self.k1             = 1.0    # centre-return gain
+        self.k2             = 1.0    # crosstrack gain
+        # heading_scale:  0 = pure crosstrack only (start here)
+        #                 1 = full anticipatory heading
+        #                -1 = if heading is acting backwards, try negative
+        self.heading_scale  = 0.0
+        self.alpha          = 0.4    # EMA smoothing (0=frozen, 1=no filter)
+        self.max_steer      = 0.5    # rad — physical joint limit
         self.wheelbase      = 0.28   # m
 
         self.declare_parameter('target_speed',  self.target_speed)
@@ -94,20 +119,16 @@ class LinderothController(Node):
             return
 
         e_n  = self.e_n
-        # heading_scale=0 → e_th=0 → formula reduces to δ=atan(e_n/k2)
-        # heading_scale=1 → full anticipatory look-ahead heading
-        # The negation aligns the look-ahead heading convention with Linderoth eq. 4.53.
-        e_th = self.heading_scale * (-self.e_th)
+        e_th = self.heading_scale * self.e_th
         k12  = self.k1 + self.k2
 
-        numerator   = -math.cos(e_th) * e_n  -  k12 * math.sin(e_th)
-        denominator =  self.k1  -  k12 * math.cos(e_th)  +  math.sin(e_th) * e_n
+        # ── Linderoth eq. 4.53, negated num+den so atan2 works correctly ──
+        # At equilibrium (e_n=0, e_th=0):
+        #   num2 = 0,  den2 = k2 > 0  →  atan2(0, k2) = 0  ✓
+        num2 =  math.cos(e_th) * e_n  +  k12 * math.sin(e_th)
+        den2 =  k12 * math.cos(e_th)  -  math.sin(e_th) * e_n  -  self.k1
 
-        if abs(denominator) < 1e-6:
-            steering_angle = math.copysign(math.pi / 2.0, numerator)
-        else:
-            steering_angle = math.atan(numerator / denominator)
-
+        steering_angle = math.atan2(num2, den2)
         steering_angle = max(-self.max_steer, min(self.max_steer, steering_angle))
 
         self.smooth_steer = (self.alpha * steering_angle
@@ -121,8 +142,10 @@ class LinderothController(Node):
         self.cmd_pub.publish(cmd)
 
         self.get_logger().info(
-            f'e_n={e_n:+.3f}m  e_th={math.degrees(e_th):+.1f}°  '
-            f'delta={math.degrees(self.smooth_steer):+.1f}°  omega={yaw_rate:+.3f}rad/s',
+            f'e_n={e_n:+.3f}m  e_th_raw={math.degrees(self.e_th):+.1f}°  '
+            f'e_th_in={math.degrees(e_th):+.1f}°  '
+            f'num2={num2:+.4f}  den2={den2:+.4f}  '
+            f'delta={math.degrees(self.smooth_steer):+.1f}°  omega={yaw_rate:+.3f}',
             throttle_duration_sec=0.5)
 
     def _publish_zero(self):
