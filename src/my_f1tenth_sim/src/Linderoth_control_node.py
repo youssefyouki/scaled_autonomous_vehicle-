@@ -65,19 +65,20 @@ class LinderothController(Node):
         self.e_th         = 0.0
         self.v_actual     = 0.05
         self.smooth_steer = 0.0
+        self._first_tick  = True
 
         self.last_perception_stamp = self.get_clock().now()
         self.PERCEPTION_TIMEOUT_S  = 1.0
 
         # ── Tunable parameters ─────────────────────────────────────────────
-        self.target_speed   = 0.35   # m/s
+        self.target_speed   = 0.50   # m/s
         self.k1             = 1.0    # centre-return gain
         self.k2             = 1.0    # crosstrack gain
         # heading_scale:  0 = pure crosstrack only (start here)
         #                 1 = full anticipatory heading
         #                -1 = if heading is acting backwards, try negative
         self.heading_scale  = 0.0
-        self.alpha          = 0.4    # EMA smoothing (0=frozen, 1=no filter)
+        self.alpha          = 0.5    # EMA smoothing (0=frozen, 1=no filter)
         self.max_steer      = 0.5    # rad — physical joint limit
         self.wheelbase      = 0.28   # m
 
@@ -131,10 +132,14 @@ class LinderothController(Node):
         steering_angle = math.atan2(num2, den2)
         steering_angle = max(-self.max_steer, min(self.max_steer, steering_angle))
 
-        self.smooth_steer = (self.alpha * steering_angle
+        if self._first_tick:
+            self.smooth_steer = steering_angle
+            self._first_tick  = False
+        else:
+            self.smooth_steer = (self.alpha * steering_angle
                              + (1.0 - self.alpha) * self.smooth_steer)
 
-        yaw_rate = self.v_actual * math.tan(self.smooth_steer) / self.wheelbase
+        yaw_rate = self.target_speed * math.tan(self.smooth_steer) / self.wheelbase
 
         cmd = Twist()
         cmd.linear.x  = self.target_speed

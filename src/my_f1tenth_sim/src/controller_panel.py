@@ -67,7 +67,7 @@ CONTROLLERS = {
         'executable': 'Linderoth_control_node.py',
         'node_name':  'linderoth_controller',
         'params': [
-            ('target_speed',   0.35, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
+            ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
             ('k1',             1.00, 0.01, 3.00, 0.05, 'k1            centre-return gain'),
             ('k2',             1.00, 0.01, 3.00, 0.05, 'k2            crosstrack gain'),
             ('heading_scale',  0.00, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
@@ -383,6 +383,21 @@ class ControllerPanel:
         self.node.controller_started()   # release zero hold so controller drives
         self.active_ctrl = name
         self.status_lbl.config(text=f'● {name}', fg=GREEN)
+        # Sync node params with current slider values once the service is ready.
+        self._push_all_params(name)
+
+    def _push_all_params(self, ctrl_name: str, attempt: int = 0):
+        """Push all slider values to the running controller, retrying until its
+        SetParameters service becomes available (typically within ~1 second)."""
+        if self.active_ctrl != ctrl_name:
+            return
+        node_name = CONTROLLERS[ctrl_name]['node_name']
+        client = self.node._param_clients.get(node_name)
+        if client and client.service_is_ready():
+            for pname, var in self._slider_vars[ctrl_name].items():
+                self.node.set_param(node_name, pname, var.get())
+        elif attempt < 30:          # retry every 200 ms for up to 6 s
+            self.root.after(200, lambda: self._push_all_params(ctrl_name, attempt + 1))
 
     def _kill_proc(self, proc: subprocess.Popen):
         """Kill every process in the subprocess's session group."""
