@@ -77,8 +77,8 @@ class LinderothController(Node):
         # heading_scale:  0 = pure crosstrack only (start here)
         #                 1 = full anticipatory heading
         #                -1 = if heading is acting backwards, try negative
-        self.heading_scale  = 0.0
-        self.alpha          = 0.5    # EMA smoothing (0=frozen, 1=no filter)
+        self.heading_scale  = 0.35
+        self.alpha          = 0.4    # EMA smoothing (0=frozen, 1=no filter)
         self.max_steer      = 0.5    # rad — physical joint limit
         self.wheelbase      = 0.28   # m
 

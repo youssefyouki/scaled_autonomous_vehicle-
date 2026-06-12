@@ -44,17 +44,19 @@ class StanleyController(Node):
         self.last_perception_stamp = self.get_clock().now()
         self.PERCEPTION_TIMEOUT_S  = 1.0
 
-        self.target_speed = 0.5    # m/s
-        self.k            = 1.0    # crosstrack gain
-        self.k_soft       = 0.4    # softening term — prevents div/0 at v≈0
-        self.alpha        = 0.5    # EMA smoothing weight
-        self.max_steer    = 0.5    # rad
-        self.wheelbase    = 0.28   # m
+        self.target_speed  = 0.5    # m/s
+        self.k             = 1.6    # crosstrack gain
+        self.k_soft        = 0.4    # softening term — prevents div/0 at v≈0
+        self.alpha         = 0.4    # EMA smoothing weight
+        self.heading_scale = 0.5    # heading error multiplier (1.0 = full Stanley, 0 = pure CTE)
+        self.max_steer     = 0.5    # rad
+        self.wheelbase     = 0.28   # m
 
-        self.declare_parameter('target_speed', self.target_speed)
-        self.declare_parameter('k',            self.k)
-        self.declare_parameter('k_soft',       self.k_soft)
-        self.declare_parameter('alpha',        self.alpha)
+        self.declare_parameter('target_speed',  self.target_speed)
+        self.declare_parameter('k',             self.k)
+        self.declare_parameter('k_soft',        self.k_soft)
+        self.declare_parameter('alpha',         self.alpha)
+        self.declare_parameter('heading_scale', self.heading_scale)
         self.add_on_set_parameters_callback(self._on_param_change)
 
         self.create_timer(0.05, self.control_loop)
@@ -62,10 +64,11 @@ class StanleyController(Node):
 
     def _on_param_change(self, params):
         for p in params:
-            if   p.name == 'target_speed': self.target_speed = p.value
-            elif p.name == 'k':            self.k            = p.value
-            elif p.name == 'k_soft':       self.k_soft       = p.value
-            elif p.name == 'alpha':        self.alpha        = p.value
+            if   p.name == 'target_speed':  self.target_speed  = p.value
+            elif p.name == 'k':             self.k             = p.value
+            elif p.name == 'k_soft':        self.k_soft        = p.value
+            elif p.name == 'alpha':         self.alpha         = p.value
+            elif p.name == 'heading_scale': self.heading_scale = p.value
         return SetParametersResult(successful=True)
 
     def crosstrack_cb(self, msg: Float32):
@@ -86,8 +89,9 @@ class StanleyController(Node):
                                    throttle_duration_sec=1.0)
             return
 
-        steering_angle = self.th_e + math.atan2(self.k * self.e,
-                                                 self.v_actual + self.k_soft)
+        steering_angle = (self.heading_scale * self.th_e
+                          + math.atan2(self.k * self.e,
+                                       self.v_actual + self.k_soft))
         steering_angle = max(-self.max_steer, min(self.max_steer, steering_angle))
 
         self.smooth_steer = (self.alpha * steering_angle

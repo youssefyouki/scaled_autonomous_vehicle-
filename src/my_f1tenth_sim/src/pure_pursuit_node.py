@@ -42,8 +42,8 @@ class PurePursuitController(Node):
         self.PERCEPTION_TIMEOUT_S  = 1.0
 
         self.target_speed   = 0.5    # m/s
-        self.lookahead_dist = 0.3    # m  — virtual target distance ahead
-        self.alpha          = 0.5    # EMA smoothing weight
+        self.lookahead_dist = 0.5    # m  — virtual target distance ahead
+        self.alpha          = 0.4    # EMA smoothing weight
         self.max_steer      = 0.5    # rad — physical joint limit
         self.wheelbase      = 0.28   # m
 

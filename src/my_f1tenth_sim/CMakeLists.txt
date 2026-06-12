@@ -46,4 +46,11 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install LaneAssist library next to the scripts so lane_detector_node.py
+# can locate it via __file__ at runtime (detect.py / lanekeeping.py / config.ini).
+install(DIRECTORY
+  src/laneassist
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

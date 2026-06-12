@@ -49,18 +49,19 @@ CONTROLLERS = {
         'params': [
             # (name, default, min, max, resolution, label)
             ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
-            ('lookahead_dist', 0.30, 0.05, 1.00, 0.01, 'Lookahead     (m)'),
-            ('alpha',          0.50, 0.00, 1.00, 0.05, 'alpha         EMA'),
+            ('lookahead_dist', 0.50, 0.05, 1.00, 0.01, 'Lookahead     (m)'),
+            ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
     'Stanley': {
         'executable': 'stanley_control_node.py',
         'node_name':  'stanley_controller',
         'params': [
-            ('target_speed', 0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
-            ('k',            1.00, 0.10, 5.00, 0.10, 'k             crosstrack gain'),
-            ('k_soft',       0.40, 0.01, 2.00, 0.01, 'k_soft        low-speed softening'),
-            ('alpha',        0.50, 0.00, 1.00, 0.05, 'alpha         EMA'),
+            ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
+            ('k',              1.60, 0.10, 5.00, 0.10, 'k             crosstrack gain'),
+            ('k_soft',         0.40, 0.01, 2.00, 0.01, 'k_soft        low-speed softening'),
+            ('heading_scale',  0.50, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
+            ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
     'Linderoth': {
@@ -70,7 +71,7 @@ CONTROLLERS = {
             ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
             ('k1',             1.00, 0.01, 3.00, 0.05, 'k1            centre-return gain'),
             ('k2',             1.00, 0.01, 3.00, 0.05, 'k2            crosstrack gain'),
-            ('heading_scale',  0.00, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
+            ('heading_scale',  0.35, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
             ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
