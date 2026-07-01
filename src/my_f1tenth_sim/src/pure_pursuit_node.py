@@ -19,7 +19,8 @@ Pure Pursuit law:
 import math
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import SetParametersResult
@@ -32,14 +33,26 @@ class PurePursuitController(Node):
         self.create_subscription(Float32, '/perception/crosstrack_error',
                                  self.crosstrack_cb, 10)
         self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(Bool, '/rrt/active', self._rrt_active_cb,
+                                 QoSProfile(depth=1,
+                                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_subscription(Bool, '/rrt/goal_reached', self._goal_reached_cb,
+                                 QoSProfile(depth=1,
+                                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_subscription(Bool, '/astar/goal_reached', self._goal_reached_cb,
+                                 QoSProfile(depth=1,
+                                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.e            = 0.0
         self.v_actual     = 0.1
         self.smooth_steer = 0.0
+        self._rrt_active  = False    # True while RRT planner is driving
+        self._goal_reached = False   # True once RRT planner signals goal reached
 
         self.last_perception_stamp = self.get_clock().now()
         self.PERCEPTION_TIMEOUT_S  = 1.0
+        self._timed_out = False      # True once we've sent the single stop command
 
         self.target_speed   = 0.5    # m/s
         self.lookahead_dist = 0.5    # m  — virtual target distance ahead
@@ -62,19 +75,37 @@ class PurePursuitController(Node):
             elif p.name == 'alpha':          self.alpha          = p.value
         return SetParametersResult(successful=True)
 
+    def _rrt_active_cb(self, msg: Bool):
+        self._rrt_active = msg.data
+
+    def _goal_reached_cb(self, msg: Bool):
+        self._goal_reached = msg.data
+        if msg.data:
+            # Immediately zero out commands and reset smoothing state
+            self._publish_zero()
+            self.smooth_steer = 0.0
+            self.get_logger().info('Goal reached — controller stopped.')
+
     def crosstrack_cb(self, msg: Float32):
         self.e = msg.data
         self.last_perception_stamp = self.get_clock().now()
+        self._timed_out = False
 
     def odom_cb(self, msg: Odometry):
         self.v_actual = max(0.05, abs(msg.twist.twist.linear.x))
 
     def control_loop(self):
+        # Hard stop when the RRT planner has declared goal reached
+        if self._goal_reached:
+            self._publish_zero()
+            return
+
         age = (self.get_clock().now() - self.last_perception_stamp).nanoseconds * 1e-9
         if age > self.PERCEPTION_TIMEOUT_S:
-            self._publish_zero()
-            self.get_logger().warn('No perception data — car stopped.',
-                                   throttle_duration_sec=1.0)
+            if not self._timed_out:
+                self._publish_zero()
+                self._timed_out = True
+                self.get_logger().warn('No perception data — car stopped.')
             return
 
         alpha         = math.atan2(self.e, self.lookahead_dist)

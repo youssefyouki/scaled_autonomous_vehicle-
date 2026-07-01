@@ -33,8 +33,9 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32
+from std_msgs.msg import Bool, Float32
 
 
 class LaneDetector(Node):
@@ -48,6 +49,12 @@ class LaneDetector(Node):
         self.bridge = CvBridge()
         self.e_pub  = self.create_publisher(Float32, '/perception/crosstrack_error', 10)
         self.th_pub = self.create_publisher(Float32, '/perception/heading_error', 10)
+
+        # Mute lane detection while RRT planner is navigating so its CTE/heading
+        # don't compete with the planner's CTE on the same topic.
+        _latched = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/rrt/active', self._rrt_active_cb, _latched)
+        self._rrt_active = False
 
         # ── BEV calibration ───────────────────────────────────────────────────
         # Bottom source row extended to 390: raw rows 325-390 (beside/in-front
@@ -452,9 +459,14 @@ class LaneDetector(Node):
             trust_l = trust_r = True
         return lc, rc, l_cert, r_cert, trust_l, trust_r
 
-    # ══════════════════════════ ROS callback ══════════════════════════════════
+    # ══════════════════════════ ROS callbacks ═════════════════════════════════
+
+    def _rrt_active_cb(self, msg: Bool):
+        self._rrt_active = msg.data
 
     def image_callback(self, msg):
+        if self._rrt_active:
+            return  # RRT planner provides CTE — skip to avoid topic competition
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         H_img, W_img = frame.shape[:2]
 

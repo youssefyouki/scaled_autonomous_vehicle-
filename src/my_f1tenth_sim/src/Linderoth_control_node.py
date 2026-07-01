@@ -44,7 +44,8 @@ Tuning sequence:
 import math
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import SetParametersResult
@@ -59,6 +60,9 @@ class LinderothController(Node):
         self.create_subscription(Float32, '/perception/heading_error',
                                  self.heading_cb, 10)
         self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(Bool, '/rrt/active', self._rrt_active_cb,
+                                 QoSProfile(depth=1,
+                                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.e_n          = 0.0
@@ -66,9 +70,11 @@ class LinderothController(Node):
         self.v_actual     = 0.05
         self.smooth_steer = 0.0
         self._first_tick  = True
+        self._rrt_active  = False    # True while RRT planner is driving
 
         self.last_perception_stamp = self.get_clock().now()
         self.PERCEPTION_TIMEOUT_S  = 1.0
+        self._timed_out = False      # True once we've sent the single stop command
 
         # ── Tunable parameters ─────────────────────────────────────────────
         self.target_speed   = 0.50   # m/s
@@ -77,7 +83,7 @@ class LinderothController(Node):
         # heading_scale:  0 = pure crosstrack only (start here)
         #                 1 = full anticipatory heading
         #                -1 = if heading is acting backwards, try negative
-        self.heading_scale  = 0.35
+        self.heading_scale  = 0.50
         self.alpha          = 0.4    # EMA smoothing (0=frozen, 1=no filter)
         self.max_steer      = 0.5    # rad — physical joint limit
         self.wheelbase      = 0.28   # m
@@ -101,9 +107,13 @@ class LinderothController(Node):
             elif p.name == 'alpha':         self.alpha         = p.value
         return SetParametersResult(successful=True)
 
+    def _rrt_active_cb(self, msg: Bool):
+        self._rrt_active = msg.data
+
     def crosstrack_cb(self, msg: Float32):
         self.e_n = msg.data
         self.last_perception_stamp = self.get_clock().now()
+        self._timed_out = False
 
     def heading_cb(self, msg: Float32):
         self.e_th = max(-math.radians(20.0), min(math.radians(20.0), msg.data))
@@ -114,9 +124,10 @@ class LinderothController(Node):
     def control_loop(self):
         age = (self.get_clock().now() - self.last_perception_stamp).nanoseconds * 1e-9
         if age > self.PERCEPTION_TIMEOUT_S:
-            self._publish_zero()
-            self.get_logger().warn('No perception data — car stopped.',
-                                   throttle_duration_sec=1.0)
+            if not self._timed_out:
+                self._publish_zero()
+                self._timed_out = True
+                self.get_logger().warn('No perception data — car stopped.')
             return
 
         e_n  = self.e_n

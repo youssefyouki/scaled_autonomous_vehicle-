@@ -29,6 +29,7 @@ install(DIRECTORY
   urdf
   worlds
   materials
+  config
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -43,6 +44,8 @@ install(
     src/pure_pursuit_node.py
     src/Linderoth_control_node.py
     src/controller_panel.py
+    src/rrt_planner_node.py
+    src/astar_planner_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

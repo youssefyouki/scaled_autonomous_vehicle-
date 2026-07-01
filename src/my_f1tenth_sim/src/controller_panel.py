@@ -35,7 +35,8 @@ from rcl_interfaces.msg import Parameter as RosParam
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
 
@@ -71,7 +72,7 @@ CONTROLLERS = {
             ('target_speed',   0.50, 0.10, 1.50, 0.01, 'Speed         (m/s)'),
             ('k1',             1.00, 0.01, 3.00, 0.05, 'k1            centre-return gain'),
             ('k2',             1.00, 0.01, 3.00, 0.05, 'k2            crosstrack gain'),
-            ('heading_scale',  0.35, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
+            ('heading_scale',  0.50, 0.00, 1.00, 0.05, 'hdg_scale     0=crosstrack 1=full'),
             ('alpha',          0.40, 0.00, 1.00, 0.05, 'alpha         EMA'),
         ],
     },
@@ -98,12 +99,25 @@ class PanelNode(Node):
         self.cte = 0.0
         self.hdg = 0.0
         self._current_pose = Pose()
+        self.goal_reached = False   # set True when RRT publishes goal_reached
 
         self.create_subscription(Float32, '/perception/crosstrack_error',
                                  lambda m: setattr(self, 'cte', m.data), 10)
         self.create_subscription(Float32, '/perception/heading_error',
                                  lambda m: setattr(self, 'hdg', m.data), 10)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
+        # Latched so the panel picks up the state even if it starts after the event.
+        # No publisher in lane-detection mode → flag stays False, no side effects.
+        _latched = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/rrt/goal_reached',
+                                 lambda m: setattr(self, 'goal_reached', m.data),
+                                 _latched)
+        self.create_subscription(Bool, '/astar/goal_reached',
+                                 lambda m: setattr(self, 'goal_reached', m.data),
+                                 _latched)
+        # Publishers let the panel reset both latches before starting a new controller.
+        self._rrt_goal_reached_pub   = self.create_publisher(Bool, '/rrt/goal_reached',   _latched)
+        self._astar_goal_reached_pub = self.create_publisher(Bool, '/astar/goal_reached', _latched)
 
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -163,6 +177,13 @@ class PanelNode(Node):
         """Re-engage the continuous zero hold."""
         self._holding_stop = True
 
+    def reset_goal_reached(self):
+        """Clear the goal-reached latch so a freshly-started controller
+        does not receive the stale True from the previous run."""
+        self.goal_reached = False
+        self._rrt_goal_reached_pub.publish(Bool(data=False))
+        self._astar_goal_reached_pub.publish(Bool(data=False))
+
 
 # ── GUI side ───────────────────────────────────────────────────────────────────
 
@@ -172,6 +193,7 @@ class ControllerPanel:
         self.node  = ros_node
         self.proc: subprocess.Popen | None = None
         self.active_ctrl: str | None       = None
+        self._prev_goal_reached            = False  # edge-detect goal_reached
 
         self.root = tk.Tk()
         self.root.title('F1TENTH Controller Panel')
@@ -372,6 +394,9 @@ class ControllerPanel:
 
     def _start(self):
         self._stop()
+        # Clear the /rrt/goal_reached latch BEFORE launching the new controller
+        # process so it does not receive the stale True from the previous run.
+        self.node.reset_goal_reached()
         name = self.ctrl_var.get()
         exe  = CONTROLLERS[name]['executable']
         # start_new_session gives the child its own process group so we can
@@ -436,7 +461,16 @@ class ControllerPanel:
         if self.active_ctrl is None:
             self.node._cmd_pub.publish(Twist())
 
-        # detect subprocess crash
+        # ── RRT goal-reached: transition to STOPPED on the rising edge ─────────
+        # Detect False → True transition so _stop() is called exactly once per
+        # goal arrival. The user can then click ▶ Start to run the next path.
+        # In lane-detection mode goal_reached is always False → no-op.
+        cur_gr = self.node.goal_reached
+        if cur_gr and not self._prev_goal_reached:
+            self._stop()          # reuses the existing stop logic (kills proc, STOPPED label)
+        self._prev_goal_reached = cur_gr
+
+        # detect controller subprocess crash
         if self.proc is not None and self.proc.poll() is not None:
             proc             = self.proc
             self.proc        = None
